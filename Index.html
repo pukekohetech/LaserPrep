@@ -54,11 +54,11 @@
 <div id="out"></div>
 
 <div class="info">
-  <strong>Smart packing rules (MaxRects-style):</strong>
+  <strong>Smart packing rules (shelf layout):</strong>
   <ul>
-    <li>Shapes/images/text that touch or overlap are fused into a single mover</li>
-    <li>Each mover is packed as a rectangle into the sheet using free-rectangles</li>
-    <li>Big pieces go down first, small pieces tuck into remaining gaps</li>
+    <li>Shapes/images/text that touch or overlap are fused into a single rigid mover</li>
+    <li>Movers are treated as rectangles and placed in rows from top-left, like shelves</li>
+    <li>Each row is filled left→right; new rows start directly underneath</li>
     <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
   </ul>
   100% offline • Works with multiple files • Battle-tested
@@ -157,7 +157,7 @@ async function processAll() {
       }
     });
 
-    // Fix red lines
+    // Fix red lines (force pure red, fully opaque, no fill)
     svg.querySelectorAll('*').forEach(el => {
       const stroke = (el.getAttribute('stroke') || '').toLowerCase();
       if (/ff0000|red|#f00|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\)/.test(stroke)) {
@@ -223,7 +223,8 @@ function isShapeOrImage(el) {
   const tag = el.tagName.toLowerCase();
   return [
     "path", "rect", "circle", "ellipse",
-    "polygon", "polyline", "image", "text"
+    "polygon", "polyline", "line",
+    "image", "text"
   ].includes(tag);
 }
 
@@ -270,7 +271,7 @@ function propagateTransforms(rootContainer) {
 /* Move all shapes/images/text to rootContainer & remove internal groups. */
 function explodeGroupsToShapes(rootContainer) {
   const shapes = Array.from(
-    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image, text")
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
   );
 
   shapes.forEach(el => {
@@ -313,7 +314,7 @@ function buildMoversFromOverlap(rootContainer) {
   movers = [];
 
   const allShapes = Array.from(
-    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image, text")
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
   );
 
   allShapes.forEach(el => {
@@ -355,120 +356,64 @@ function buildMoversFromOverlap(rootContainer) {
   }
 }
 
-/* ---------- MaxRects-style free-rectangle packing ---------- */
+/* ---------- Improved Shelf (row) packing: offline + Best Width Fit ---------- */
 
-// Remove any free rect that is fully contained in another
-function pruneFreeRects(freeRects) {
-  for (let i = 0; i < freeRects.length; i++) {
-    const a = freeRects[i];
-    for (let j = 0; j < freeRects.length; j++) {
-      if (i === j) continue;
-      const b = freeRects[j];
-      if (a.x >= b.x &&
-          a.y >= b.y &&
-          a.x + a.width  <= b.x + b.width &&
-          a.y + a.height <= b.y + b.height) {
-        freeRects.splice(i, 1);
-        i--;
-        break;
-      }
-    }
-  }
-}
-
-/* Place movers as rectangles inside sheet via free-rectangles. */
-function packWithFreeRects() {
+function packShelf() {
   if (!movers.length) return;
 
-  // Sort movers by area descending (big pieces first)
+  // 1) Offline sort by descending area (width * height)
   movers.sort((a, b) => {
-    const aa = a.baseBBox.width * a.baseBBox.height;
-    const bb = b.baseBBox.width * b.baseBBox.height;
-    return bb - aa;
+    const areaA = a.baseBBox.width * a.baseBBox.height;
+    const areaB = b.baseBBox.width * b.baseBBox.height;
+    return areaB - areaA;
   });
 
-  // Initial free space is the whole sheet
-  const freeRects = [{
-    x: 0,
-    y: 0,
-    width: sheetW,
-    height: sheetH
-  }];
+  const remaining = [...movers];
+  let cursorY = 0;
+  const sheetWidth = sheetW;
 
-  for (const m of movers) {
-    const w = m.baseBBox.width;
-    const h = m.baseBBox.height;
+  // Build rows from top to bottom
+  while (remaining.length) {
+    let cursorX = 0;
+    let rowHeight = 0;
 
-    let bestRectIndex = -1;
-    let bestScore = Infinity;
-    let bestX = 0;
-    let bestY = 0;
+    // Fill one row left → right
+    while (remaining.length) {
+      const spaceLeft = sheetWidth - cursorX;
 
-    // Find best free rect this mover can fit into
-    for (let i = 0; i < freeRects.length; i++) {
-      const fr = freeRects[i];
-      if (w <= fr.width && h <= fr.height) {
-        // Simple score: leftover area after placement
-        const leftoverW = fr.width - w;
-        const leftoverH = fr.height - h;
-        const score = leftoverW * leftoverH;
-        if (score < bestScore) {
-          bestScore = score;
-          bestRectIndex = i;
-          bestX = fr.x;
-          bestY = fr.y;
+      // Movers that still fit in this row
+      const candidates = remaining.filter(m => m.baseBBox.width <= spaceLeft);
+
+      if (!candidates.length) break;
+
+      // 2) Best Width Fit: smallest leftover gap in this row
+      let best = candidates[0];
+      let bestGap = spaceLeft - best.baseBBox.width;
+
+      for (const m of candidates) {
+        const gap = spaceLeft - m.baseBBox.width;
+        if (gap < bestGap) {
+          best = m;
+          bestGap = gap;
         }
       }
+
+      // Place best mover so its bbox top-left is at (cursorX, cursorY)
+      best.tx = cursorX - best.baseBBox.x;
+      best.ty = cursorY - best.baseBBox.y;
+
+      cursorX += best.baseBBox.width;
+      rowHeight = Math.max(rowHeight, best.baseBBox.height);
+
+      const idx = remaining.indexOf(best);
+      if (idx !== -1) remaining.splice(idx, 1);
     }
 
-    if (bestRectIndex === -1) {
-      // No free rect could hold it; fallback: leave in original position
-      // tx,ty = 0 in this case
-      continue;
-    }
-
-    const fr = freeRects[bestRectIndex];
-
-    // Place mover at (bestX, bestY)
-    m.tx = bestX - m.baseBBox.x;
-    m.ty = bestY - m.baseBBox.y;
-
-    // Split the used rect into right & bottom pieces
-    const usedW = w;
-    const usedH = h;
-
-    const newRects = [];
-
-    // Right side
-    const rightW = fr.width - usedW;
-    if (rightW > 0) {
-      newRects.push({
-        x: fr.x + usedW,
-        y: fr.y,
-        width: rightW,
-        height: usedH
-      });
-    }
-
-    // Bottom side
-    const bottomH = fr.height - usedH;
-    if (bottomH > 0) {
-      newRects.push({
-        x: fr.x,
-        y: fr.y + usedH,
-        width: fr.width,
-        height: bottomH
-      });
-    }
-
-    // Remove used rect, add new ones
-    freeRects.splice(bestRectIndex, 1);
-    freeRects.push(...newRects);
-
-    pruneFreeRects(freeRects);
+    // Next row
+    cursorY += rowHeight;
   }
 
-  // Apply transforms to members based on tx,ty
+  // 3) Apply transforms to all members of each mover
   movers.forEach(m => {
     m.members.forEach(el => {
       const base = m.memberBaseTransforms.get(el) || "";
@@ -502,7 +447,7 @@ function runPacking() {
     return;
   }
 
-  packWithFreeRects();
+  packShelf();
 
   alert("Packing complete.");
   packBtn.disabled = true;
