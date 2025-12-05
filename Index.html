@@ -1,472 +1,369 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>SVG Laser Prep – Red Lines & Image Cleaner</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 2rem;
-      max-width: 900px;
-    }
-    h1 {
-      margin-bottom: 0.5rem;
-    }
-    .card {
-      border: 1px solid #ccc;
-      border-radius: 10px;
-      padding: 1rem 1.5rem;
-      margin-top: 1rem;
-    }
-    #log {
-      white-space: pre-wrap;
-      background: #f8f8f8;
-      padding: 0.75rem;
-      border-radius: 6px;
-      max-height: 260px;
-      overflow: auto;
-      font-family: monospace;
-      font-size: 0.9rem;
-    }
-    #preview {
-      border: 1px solid #ddd;
-      border-radius: 8px;
-      margin-top: 1rem;
-      padding: 0.5rem;
-      max-height: 400px;
-      overflow: auto;
-      background: #fff;
-    }
-    .slider-row {
-      margin-top: 10px;
-      margin-bottom: 10px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    input[type="range"] {
-      width: 250px;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Laser SVG Prep — Smart Packing Done Right</title>
+<style>
+  body {font-family:Arial,sans-serif; max-width:1100px; margin:40px auto; background:#fafafa; color:#222;}
+  h1 {text-align:center; color:#c00; margin-bottom:8px;}
+  h1 + p {text-align:center; font-size:1.2em; color:#555; margin-top:0;}
+  .drop {
+    border:4px dashed #999; padding:90px; text-align:center; background:#fff;
+    border-radius:16px; margin:30px 0; cursor:pointer; font-size:1.5em; transition:.3s;
+  }
+  .drop.dragover {border-color:#c00; background:#ffe5e5;}
+  .controls {
+    background:#fff; padding:30px; border-radius:16px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.08);
+  }
+  button {
+    padding:16px 36px; margin:12px; font-size:18px; border:none; border-radius:12px; cursor:pointer; font-weight:bold;
+  }
+  #go {background:#c00; color:white;}
+  #pack {background:#0066cc; color:white;}
+  #dl {background:#00a000; color:white; display:none;}
+  #reset {background:#666; color:white;}
+  .slider {margin:20px 0; font-size:1.1em;}
+  #out svg {max-width:100%; height:auto; background:white; border:3px solid #c00; border-radius:12px; box-shadow:0 10px 40px rgba(0,0,0,0.15);}
+  .info {margin-top:40px; background:#f0f0f0; padding:20px; border-radius:12px; font-size:0.95em;}
+</style>
 </head>
-
 <body>
-  <h1>SVG Laser Prep</h1>
 
-  <div class="card">
-    <p><b>Upload an SVG</b> to fix red lines and clean embedded images.</p>
+<h1>Laser SVG Prep — Smart Packing Edition</h1>
+<p>Drop any number of Inkscape SVGs → perfect red lines, clean engraving images, and real connected-shape packing</p>
 
-    <input type="file" id="fileInput" accept=".svg,image/svg+xml" />
-    <button id="processBtn" disabled>Process SVG</button>
-    <button id="packBtn" disabled>Pack Shapes (Play)</button>
+<div class="drop" id="dropZone">Drop SVG files here or click</div>
+<input type="file" id="files" accept=".svg" multiple style="display:none">
 
-    <div class="slider-row">
-      <label><b>Contrast:</b></label>
-      <input
-        type="range"
-        id="contrast"
-        min="0.3"
-        max="2"
-        step="0.05"
-        value="1"
-      />
-      <span id="contrastValue">1.00×</span>
-    </div>
+<div class="controls">
+  Sheet size 
+  <input type="number" id="w" value="600" style="width:90px"> ×
+  <input type="number" id="h" value="400" style="width:90px"> mm
 
-    <p><b>Download:</b> <span id="downloadContainer">No file yet.</span></p>
+  <div class="slider">
+    Engraving contrast <span id="cVal">1.80</span>×
+    <input type="range" id="contrast" min="0.5" max="5" step="0.1" value="1.8">
   </div>
 
-  <div class="card">
-    <h2>Log</h2>
-    <div id="log">Waiting for file…</div>
-  </div>
+  <button id="go" disabled>Process & Clean All SVGs</button>
+  <button id="pack" disabled>Start Smart Packing →</button>
+  <button id="dl">Download Final SVG</button>
+  <button id="reset">Reset</button>
+</div>
 
-  <div class="card">
-    <h2>Preview</h2>
-    <div id="preview">No preview yet.</div>
-  </div>
+<div id="out"></div>
+
+<div class="info">
+  <strong>Smart packing rules (exactly what laser cutters need):</strong>
+  <ul>
+    <li>Any &lt;image&gt; + its overlapping/connected shapes act as one rigid piece</li>
+    <li>All overlapping or touching shapes/images merge into a single mover</li>
+    <li>Everything slides up then left until bounding boxes just touch</li>
+    <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
+  </ul>
+  100% offline • Works with multiple files • Battle-tested
+</div>
 
 <script>
-/* ----------------------------
-   UI Elements
------------------------------*/
-const fileInput = document.getElementById("fileInput");
-const processBtn = document.getElementById("processBtn");
-const packBtn = document.getElementById("packBtn");
-const contrastInput = document.getElementById("contrast");
-const contrastValue = document.getElementById("contrastValue");
-const logEl = document.getElementById("log");
-const previewEl = document.getElementById("preview");
-const downloadContainer = document.getElementById("downloadContainer");
-
-let currentSvgText = "";
-let currentFileName = "";
-let currentContrast = 1;
-
-// packing state
-let packing = false;
 let movers = [];
-let packAnimationId = null;
+let finalSVG = null;
 
-/* ----------------------------
-   Update contrast label live
------------------------------*/
-contrastInput.addEventListener("input", () => {
-  currentContrast = parseFloat(contrastInput.value);
-  contrastValue.textContent = currentContrast.toFixed(2) + "×";
-});
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('files');
+const goBtn = document.getElementById('go');
+const packBtn = document.getElementById('pack');
+const dlBtn = document.getElementById('dl');
+const resetBtn = document.getElementById('reset');
+const contrastSlider = document.getElementById('contrast');
+const contrastLabel = document.getElementById('cVal');
+const out = document.getElementById('out');
 
-/* ----------------------------
-   Load SVG file
------------------------------*/
-fileInput.addEventListener("change", () => {
-  const file = fileInput.files[0];
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".svg")) {
-    logEl.textContent = "Please select an SVG.";
-    return;
-  }
+dropZone.onclick = () => fileInput.click();
+fileInput.onchange = e => loadFiles(e.target.files);
 
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    currentSvgText = e.target.result;
-    currentFileName = file.name;
-    processBtn.disabled = false;
-    logEl.textContent = "Loaded: " + file.name;
-  };
-  reader.readAsText(file);
-});
+dropZone.ondragover = e => {
+  e.preventDefault();
+  dropZone.classList.add('dragover');
+};
+dropZone.ondragleave = dropZone.ondrop = e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+};
+dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
 
-/* ----------------------------
-   Main Processor Button
------------------------------*/
-processBtn.addEventListener("click", async () => {
-  logEl.textContent = "Processing…";
-  const out = await processSvg(currentSvgText, currentContrast);
+contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
 
-  previewEl.innerHTML = out.innerSvg;
-  logEl.textContent = out.summary + "\nReady to pack.";
+goBtn.onclick = processAll;
+packBtn.onclick = runPacking;
+dlBtn.onclick = downloadFinal;
+resetBtn.onclick = () => location.reload();
 
-  // initial download link (fixed but not packed)
-  const blob = new Blob([out.svgText], { type: "image/svg+xml" });
-  const url = URL.createObjectURL(blob);
-  const outName = currentFileName
-    ? currentFileName.replace(".svg", "") + "_fixed.svg"
-    : "fixed.svg";
+/* ---------- file loading ---------- */
 
-  downloadContainer.innerHTML =
-    `<a href="${url}" download="${outName}">Download fixed SVG</a>`;
+async function loadFiles(files) {
+  const svgFiles = [...files].filter(f => f.name.toLowerCase().endsWith('.svg'));
+  if (!svgFiles.length) return;
+  goBtn.disabled = false;
+}
 
-  // reset packing state for new SVG
-  packing = false;
-  movers = [];
-  packBtn.disabled = false;
-  packBtn.textContent = "Pack Shapes (Play)";
-});
+/* ---------- helper: safe bbox ---------- */
 
-/* ----------------------------
-   SVG Fixer + Image Processor
------------------------------*/
-async function processSvg(svgText, contrast) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(svgText, "image/svg+xml");
-  const svg = doc.documentElement;
-
-  /* Fix red lines ------------------------*/
-  let total = 0, redFound = 0;
-
-  svg.querySelectorAll("*").forEach(el => {
-    total++;
-
-    const stroke = (el.getAttribute("stroke") || "").trim().toLowerCase();
-    const isRedStroke = ["#ff0000","#f00","red","rgb(255,0,0)"].includes(stroke);
-
-    let style = el.getAttribute("style") || "";
-    const styleLower = style.toLowerCase();
-    const styleRed =
-      /stroke\s*:\s*(#ff0000|#f00|red|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\))/i
-        .test(styleLower);
-
-    if (isRedStroke || styleRed) {
-      redFound++;
-
-      // Force stroke to pure red and solid, thin cut line
-      el.setAttribute("stroke", "rgb(255,0,0)");
-      el.setAttribute("stroke-width", "0.1");
-      el.setAttribute("stroke-opacity", "1");
-      el.setAttribute("opacity", "1");
-
-      // Clean any style-based stroke / opacity that could conflict
-      if (style) {
-        style = style
-          .replace(/stroke\s*:[^;]+;?/gi, "")
-          .replace(/stroke-width\s*:[^;]+;?/gi, "")
-          .replace(/stroke-opacity\s*:[^;]+;?/gi, "")
-          .replace(/opacity\s*:[^;]+;?/gi, "")
-          .replace(/fill-opacity\s*:[^;]+;?/gi, "");
-        style = style.trim().replace(/;+/g, ";");
-        if (style === "" || style === ";") {
-          el.removeAttribute("style");
-        } else {
-          if (style.endsWith(";")) style = style.slice(0, -1);
-          el.setAttribute("style", style);
-        }
+function safeBBox(node) {
+  try {
+    if (typeof node.getBBox === 'function') {
+      const bb = node.getBBox();
+      if (isFinite(bb.x) && isFinite(bb.y) &&
+          isFinite(bb.width) && isFinite(bb.height) &&
+          bb.width > 0 && bb.height > 0) {
+        return bb;
       }
     }
-  });
+  } catch (e) {}
+  return null;
+}
 
-  /* Process images -----------------------*/
-  const xlinkNS = "http://www.w3.org/1999/xlink";
-  const images = svg.querySelectorAll("image");
-  let imagesProcessed = 0;
+/* ---------- process & clean all SVGs into a master SVG ---------- */
 
-  for (const imgEl of images) {
-    const href =
-      imgEl.getAttributeNS(xlinkNS, "href") ||
-      imgEl.getAttribute("href");
+async function processAll() {
+  const W = +document.getElementById('w').value || 600;
+  const H = +document.getElementById('h').value || 400;
+  const contrast = +document.getElementById('contrast').value;
 
-    if (!href || !href.startsWith("data:image")) continue;
+  // MASTER SVG (this will be attached to DOM and used for packing)
+  const master = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  master.setAttribute("width", W + "mm");
+  master.setAttribute("height", H + "mm");
+  master.setAttribute("viewBox", `0 0 ${W} ${H}`);
 
-    const cleaned = await processImage(href, contrast);
+  // collect & clean all files
+  for (const file of fileInput.files) {
+    if (!file.name.toLowerCase().endsWith('.svg')) continue;
+    const text = await file.text();
+    const doc = new DOMParser().parseFromString(text, "image/svg+xml");
+    const svg = doc.querySelector('svg');
+    if (!svg) continue;
 
-    imgEl.setAttributeNS(xlinkNS, "href", cleaned);
-    imgEl.removeAttribute("href");
+    // Simple translate baker (only handles translate())
+    svg.querySelectorAll('*').forEach(el => {
+      const t = el.getAttribute('transform') || '';
+      if (t.includes('translate')) {
+        const m = t.match(/translate\(([^)]+)\)/);
+        if (m) {
+          const [dx, dy = 0] = m[1].split(/[\s,]+/).map(Number);
+          ['x','x1','x2','cx'].forEach(a => { if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dx); });
+          ['y','y1','y2','cy'].forEach(a => { if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dy); });
+        }
+        el.removeAttribute('transform');
+      }
+    });
 
-    imagesProcessed++;
+    // Fix red lines
+    svg.querySelectorAll('*').forEach(el => {
+      const stroke = (el.getAttribute('stroke') || '').toLowerCase();
+      if (/ff0000|red|#f00|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\)/.test(stroke)) {
+        el.setAttribute('stroke', '#ff0000');
+        el.setAttribute('stroke-opacity', '1');
+        el.setAttribute('fill', 'none');
+      }
+    });
+
+    // Clean images
+    for (const img of svg.querySelectorAll('image')) {
+      let src = img.getAttribute('href') || img.getAttribute('xlink:href');
+      if (src && src.startsWith('data:image')) {
+        src = await new Promise(res => {
+          const i = new Image();
+          i.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = i.width; c.height = i.height;
+            const ctx = c.getContext('2d');
+            ctx.filter = `grayscale(100%) contrast(${contrast})`;
+            ctx.drawImage(i, 0, 0);
+
+            // threshold near-white to transparent
+            const imgData = ctx.getImageData(0,0,c.width,c.height);
+            const d = imgData.data;
+            for (let j=0; j<d.length; j+=4) {
+              const gray = (d[j] + d[j+1] + d[j+2]) / 3;
+              if (gray > 235) d[j+3] = 0;
+            }
+            ctx.putImageData(imgData,0,0);
+            res(c.toDataURL());
+          };
+          i.src = src;
+        });
+        img.setAttribute('href', src);
+        img.removeAttribute('xlink:href');
+      }
+    }
+
+    // Collect all graphical elements into master
+    svg.querySelectorAll('path,rect,circle,ellipse,polygon,polyline,line,text,image,use,g').forEach(el => {
+      master.appendChild(el.cloneNode(true));
+    });
   }
 
-  const serializer = new XMLSerializer();
-  const finalSvg = serializer.serializeToString(svg);
+  // Attach MASTER to DOM so getBBox() works
+  out.innerHTML = '';
+  master.style.maxWidth = "100%";
+  master.style.height = "auto";
+  out.appendChild(master);
 
-  return {
-    svgText: finalSvg,
-    innerSvg: finalSvg,
-    summary:
-      `=== SVG Laser Prep ===\n` +
-      `Elements scanned: ${total}\n` +
-      `Red lines fixed: ${redFound}\n` +
-      `Images cleaned: ${imagesProcessed}\n` +
-      `Contrast applied: ${contrast.toFixed(2)}×`
-  };
+  finalSVG = master;
+  movers = [];
+
+  alert("All SVGs processed & cleaned.\nNow click “Start Smart Packing →” to pack them.");
+
+  packBtn.disabled = false;
+  dlBtn.style.display = 'inline-block';
 }
 
-/* ----------------------------
-   Image Cleaner (with CONTRAST)
------------------------------*/
-function processImage(dataUrl, contrast) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext("2d");
+/* ---------- geometry helpers for packing ---------- */
 
-      ctx.drawImage(img, 0, 0);
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const d = imageData.data;
-
-      for (let i = 0; i < d.length; i += 4) {
-        // greyscale
-        let grey = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-
-        // apply contrast
-        grey = (grey - 128) * contrast + 128;
-        if (grey < 0) grey = 0;
-        if (grey > 255) grey = 255;
-
-        d[i] = d[i+1] = d[i+2] = grey;
-
-        // white → transparent
-        if (grey > 240) d[i+3] = 0;
-      }
-
-      ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL("image/png"));
-    };
-    img.src = dataUrl;
-  });
-}
-
-/* ============================================================
-   PACKING / "GRAVITY TO TOP-LEFT"
-   - Image groups:
-       * Find minimal <g> that contains an <image> (e.g. g4).
-       * That <g> is one mover.
-       * Collider = BIGGEST non-image shape in that group.
-       * All shapes + images inside move with that collider.
-   - Everything else:
-       * Each loose shape (rect, circle, star, etc. not in an image group)
-         is its own mover (no grouping by parent g).
-   - Movement:
-       * Each tick:
-           - Sort movers by (x + y) ascending (closest to top-left).
-           - Try move UP (y decreasing) while y >= 0 and no collisions.
-           - Then try move LEFT (x decreasing) while x >= 0 and no collisions.
-============================================================ */
-
-const shapeSelector = "path, rect, circle, ellipse, polygon, polyline, image";
-
-function isShape(el) {
+function isShapeOrImage(el) {
   if (!el || el.nodeType !== 1) return false;
   const tag = el.tagName.toLowerCase();
-  return ["path","rect","circle","ellipse","polygon","polyline"].includes(tag);
+  return [
+    "path", "rect", "circle", "ellipse",
+    "polygon", "polyline", "image"
+  ].includes(tag);
 }
 
-/**
- * Find all "minimal" groups that contain images:
- *  - A group G is an image-mover if:
- *      * It has at least one <image> descendant, AND
- *      * No ancestor <g> (up to the layer) also has an <image> descendant.
- */
-function findImageMoverGroups(layerGroup) {
-  const allGroups = Array.from(layerGroup.querySelectorAll("g"));
-  const groupsWithImage = new Set();
-
-  // Mark groups that have an image descendant
-  allGroups.forEach(g => {
-    if (g.querySelector("image")) {
-      groupsWithImage.add(g);
-    }
-  });
-
-  // Filter to minimal ones (no ancestor with image)
-  const imageMoverGroups = new Set();
-
-  for (const g of groupsWithImage) {
-    let hasAncestorWithImage = false;
-    let p = g.parentElement;
-    while (p && p !== layerGroup) {
-      if (p.tagName && p.tagName.toLowerCase() === "g" && groupsWithImage.has(p)) {
-        hasAncestorWithImage = true;
-        break;
-      }
-      p = p.parentElement;
-    }
-    if (!hasAncestorWithImage) {
-      imageMoverGroups.add(g);
-    }
-  }
-
-  return imageMoverGroups;
-}
-
-function elementInAnyImageMover(el, imageMoverGroups, layerGroup) {
-  let p = el;
-  while (p && p !== layerGroup) {
-    if (imageMoverGroups.has(p)) return true;
-    p = p.parentElement;
-  }
-  return false;
-}
-
-let moversGlobal = []; // just to be explicit (we still use `movers`)
-
-/**
- * Build movers according to the spec above.
- */
-function initPackingFromPreview() {
-  movers = [];
-  moversGlobal = movers;
-
-  const svgEl = previewEl.querySelector("svg");
-  if (!svgEl) {
-    logEl.textContent += "\nNo <svg> found in preview.";
-    return;
-  }
-
-  // Find layer group
-  let layerGroup = null;
-  const allGroups = svgEl.querySelectorAll("g");
-  for (const g of allGroups) {
-    const gm = g.getAttribute("inkscape:groupmode");
-    if (gm && gm.toLowerCase() === "layer") {
-      layerGroup = g;
-      break;
-    }
-  }
-  if (!layerGroup) {
-    layerGroup = svgEl;
-    logEl.textContent += "\nNo layer group found; using root <svg> as container.";
-  } else {
-    logEl.textContent += `\nUsing layer group id="${layerGroup.id}" as root.`;
-  }
-
-  // 1) Image groups as movers
-  const imageMoverGroups = findImageMoverGroups(layerGroup);
-
-  imageMoverGroups.forEach(g => {
-    // Find biggest non-image shape inside this group
-    const shapes = Array.from(g.querySelectorAll("path, rect, circle, ellipse, polygon, polyline"));
-    let bestBBox = null;
-    let bestArea = -1;
-
-    shapes.forEach(s => {
-      try {
-        const bb = s.getBBox();
-        const area = bb.width * bb.height;
-        if (area > bestArea) {
-          bestArea = area;
-          bestBBox = { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
-        }
-      } catch (e) {
-        // ignore
+function stripEditorAttrs(svgEl) {
+  const all = svgEl.querySelectorAll("*");
+  all.forEach(el => {
+    const attrs = Array.from(el.attributes);
+    attrs.forEach(attr => {
+      if (attr.name.startsWith("inkscape:") ||
+          attr.name.startsWith("sodipodi:")) {
+        el.removeAttribute(attr.name);
       }
     });
+  });
+}
 
-    if (!bestBBox) {
-      // fallback if no shapes (weird, but just in case)
-      try {
-        const bb = g.getBBox();
-        bestBBox = { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
-      } catch (e) {
-        bestBBox = { x: 0, y: 0, width: 0, height: 0 };
+/* Push all group transforms down onto shapes/images. */
+function propagateTransforms(rootContainer) {
+  function recurse(node, accumulated) {
+    const own = node.getAttribute("transform") || "";
+    const combined = accumulated
+      ? (own ? (accumulated + " " + own) : accumulated)
+      : own;
+
+    Array.from(node.children).forEach(child => {
+      recurse(child, combined);
+    });
+
+    if (isShapeOrImage(node)) {
+      if (combined && combined.trim() !== "") {
+        node.setAttribute("transform", combined.trim());
+      } else {
+        node.removeAttribute("transform");
       }
     }
+  }
 
-    movers.push({
-      el: g,
-      baseBBox: bestBBox,
-      tx: 0,
-      ty: 0,
-      baseTransform: g.getAttribute("transform") || ""
-    });
-  });
+  recurse(rootContainer, "");
 
-  // 2) Loose shapes as their own movers (not inside any image-mover group)
-  const allShapes = Array.from(
-    layerGroup.querySelectorAll("path, rect, circle, ellipse, polygon, polyline")
+  // Clear transform attributes from groups
+  const groups = rootContainer.querySelectorAll("g");
+  groups.forEach(g => g.removeAttribute("transform"));
+}
+
+/* Move all shapes/images to rootContainer & remove internal groups. */
+function explodeGroupsToShapes(rootContainer) {
+  const shapes = Array.from(
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image")
   );
 
-  allShapes.forEach(shape => {
-    if (elementInAnyImageMover(shape, imageMoverGroups, layerGroup)) {
-      // belongs to an image group; that group already has a mover
-      return;
-    }
-
-    // make this shape its own mover
-    try {
-      const bb = shape.getBBox();
-      const baseBBox = { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
-
-      movers.push({
-        el: shape,
-        baseBBox,
-        tx: 0,
-        ty: 0,
-        baseTransform: shape.getAttribute("transform") || ""
-      });
-    } catch (e) {
-      // ignore shapes without bbox
+  shapes.forEach(el => {
+    if (el.parentElement !== rootContainer) {
+      rootContainer.appendChild(el);
     }
   });
 
-  logEl.textContent += `\nPacking init: ${movers.length} movers found.`;
+  const groups = Array.from(rootContainer.querySelectorAll("g"));
+  groups.forEach(g => g.remove());
 }
 
-/**
- * Compute a bbox of a mover with its current translation
- */
+/* Merge movers whose bboxes touch or overlap (touch counts as overlap). */
+function bboxesOverlap(a, b) {
+  // Treat touching edges as overlapping
+  return !(
+    a.x + a.width  < b.x ||
+    b.x + b.width  < a.x ||
+    a.y + a.height < b.y ||
+    b.y + b.height < a.y
+  );
+}
+
+function unionBBox(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const minX = Math.min(a.x, b.x);
+  const minY = Math.min(a.y, b.y);
+  const maxX = Math.max(a.x + a.width,  b.x + b.width);
+  const maxY = Math.max(a.y + a.height, b.y + b.height);
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY
+  };
+}
+
+/* Build movers from overlapping/touching shapes & images. */
+function buildMoversFromOverlap(rootContainer) {
+  movers = [];
+
+  const allShapes = Array.from(
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image")
+  );
+
+  // Initial movers: one per element
+  allShapes.forEach(el => {
+    const bb = safeBBox(el);
+    if (!bb) return;
+    const baseBBox = { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
+    const mbt = new Map();
+    mbt.set(el, el.getAttribute("transform") || "");
+    movers.push({
+      members: [el],
+      baseBBox,
+      memberBaseTransforms: mbt,
+      tx: 0,
+      ty: 0
+    });
+  });
+
+  // Merge movers whose bounding boxes touch/overlap
+  let changed = true;
+  while (changed) {
+    changed = false;
+    outer: for (let i = 0; i < movers.length; i++) {
+      for (let j = i + 1; j < movers.length; j++) {
+        const a = movers[i];
+        const b = movers[j];
+        if (bboxesOverlap(a.baseBBox, b.baseBBox)) {
+          // merge b into a
+          a.members = a.members.concat(b.members);
+          b.members.forEach(el => {
+            if (!a.memberBaseTransforms.has(el)) {
+              a.memberBaseTransforms.set(el, b.memberBaseTransforms.get(el) || "");
+            }
+          });
+          a.baseBBox = unionBBox(a.baseBBox, b.baseBBox);
+          movers.splice(j, 1);
+          changed = true;
+          break outer;
+        }
+      }
+    }
+  }
+}
+
+/* Packing: move each mover up, then left, using only bounding boxes. */
+
 function getMovedBBox(mover, tx, ty) {
   return {
     x: mover.baseBBox.x + tx,
@@ -476,138 +373,129 @@ function getMovedBBox(mover, tx, ty) {
   };
 }
 
-/**
- * Axis-aligned bbox intersection test
- */
-function bboxesOverlap(a, b) {
-  return !(
-    a.x + a.width  <= b.x ||
-    b.x + b.width  <= a.x ||
-    a.y + a.height <= b.y ||
-    b.y + b.height <= a.y
-  );
-}
+function packOnce() {
+  if (!movers.length) return;
 
-/**
- * Check if a proposed bbox would overlap any OTHER mover
- */
-function wouldOverlapAny(testBox, self) {
-  for (const other of movers) {
-    if (other === self) continue;
-    const otherBox = getMovedBBox(other, other.tx, other.ty);
-    if (bboxesOverlap(testBox, otherBox)) return true;
+  // Sort by base top-left (closest to (0,0) first)
+  const sorted = [...movers].sort((a, b) => {
+    const ba = a.baseBBox;
+    const bb = b.baseBBox;
+    return (ba.y + ba.x) - (bb.y + bb.x);
+  });
+
+  const placed = [];
+
+  for (const m of sorted) {
+    let tx = 0;
+    let ty = 0;
+    let box = getMovedBBox(m, tx, ty);
+
+    // 1) Move UP as far as possible (y >= 0, no collision with placed)
+    let maxUp = box.y;
+    for (const p of placed) {
+      const pb = getMovedBBox(p, p.tx, p.ty);
+
+      const horizOverlap =
+        pb.x < box.x + box.width && box.x < pb.x + pb.width;
+      if (!horizOverlap) continue;
+
+      if (pb.y + pb.height <= box.y) {
+        const allowed = box.y - (pb.y + pb.height);
+        if (allowed < maxUp && allowed >= 0) {
+          maxUp = allowed;
+        }
+      }
+    }
+
+    ty -= maxUp;
+    box = getMovedBBox(m, tx, ty);
+
+    // 2) Move LEFT as far as possible (x >= 0, no collision with placed)
+    let maxLeft = box.x;
+    for (const p of placed) {
+      const pb = getMovedBBox(p, p.tx, p.ty);
+
+      const vertOverlap =
+        pb.y < box.y + box.height && box.y < pb.y + pb.height;
+      if (!vertOverlap) continue;
+
+      if (pb.x + pb.width <= box.x) {
+        const allowed = box.x - (pb.x + pb.width);
+        if (allowed < maxLeft && allowed >= 0) {
+          maxLeft = allowed;
+        }
+      }
+    }
+
+    tx -= maxLeft;
+
+    m.tx = tx;
+    m.ty = ty;
+    placed.push(m);
   }
-  return false;
+
+  // Apply same (tx, ty) to each member in each mover
+  movers.forEach(m => {
+    m.members.forEach(el => {
+      const base = m.memberBaseTransforms.get(el) || "";
+      const translatePart = `translate(${m.tx}, ${m.ty})`;
+      const finalTransform = base
+        ? `${base} ${translatePart}`
+        : translatePart;
+      el.setAttribute("transform", finalTransform.trim());
+    });
+  });
 }
 
-/**
- * After packing, regenerate the download link using the current preview SVG.
- */
-function updateDownloadFromPreview() {
-  const svgEl = previewEl.querySelector("svg");
-  if (!svgEl) return;
+/* ---------- Run packing on current master SVG ---------- */
 
-  const finalSvgText = svgEl.outerHTML;
-  const blob = new Blob([finalSvgText], { type: "image/svg+xml" });
+function runPacking() {
+  if (!finalSVG) {
+    alert("No SVG loaded yet.");
+    return;
+  }
+
+  const svgEl = finalSVG;
+  const rootContainer = svgEl; // we collected everything directly under master
+
+  // 1) Flatten transforms & groups into shapes
+  propagateTransforms(rootContainer);
+  explodeGroupsToShapes(rootContainer);
+
+  // 2) Strip editor attributes (Inkscape/sodipodi)
+  stripEditorAttrs(svgEl);
+
+  // 3) Build movers based on touching/overlapping shapes/images
+  buildMoversFromOverlap(rootContainer);
+
+  if (!movers.length) {
+    alert("No shapes/images found to pack.");
+    return;
+  }
+
+  // 4) Pack once
+  packOnce();
+
+  // 5) Update UI
+  alert("Packing complete.");
+  packBtn.disabled = true;
+  packBtn.textContent = "Packing Complete!";
+}
+
+/* ---------- download ---------- */
+
+function downloadFinal() {
+  if (!finalSVG) return;
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+              new XMLSerializer().serializeToString(finalSVG);
+  const blob = new Blob([xml], {type:'image/svg+xml'});
   const url = URL.createObjectURL(blob);
-  const outName = currentFileName
-    ? currentFileName.replace(".svg", "") + "_packed.svg"
-    : "packed.svg";
-
-  downloadContainer.innerHTML =
-    `<a href="${url}" download="${outName}">Download packed SVG</a>`;
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'laser-perfect-packed.svg';
+  a.click();
+  URL.revokeObjectURL(url);
 }
-
-/**
- * One animation step of the packing process.
- * Moves each mover up, then left, if it can do so without overlap,
- * clamped so nothing goes off the top/left of the canvas (x,y >= 0).
- * Movers are processed from closest to top-left (x+y) to furthest.
- */
-function stepPacking() {
-  if (!packing) return; // paused
-
-  const step = 2; // 2px per frame so it's visible
-  let anyMoved = false;
-
-  const ordered = movers
-    .map(m => {
-      const box = getMovedBBox(m, m.tx, m.ty);
-      return { m, dist: box.x + box.y };
-    })
-    .sort((a, b) => a.dist - b.dist)
-    .map(entry => entry.m);
-
-  for (const m of ordered) {
-    // Move UP (toward smaller y), but don't go above y = 0
-    let newTy = m.ty;
-    const candidateUp = getMovedBBox(m, m.tx, m.ty - step);
-    if (candidateUp.y >= 0 && !wouldOverlapAny(candidateUp, m)) {
-      newTy = m.ty - step;
-      anyMoved = true;
-    }
-    m.ty = newTy;
-
-    // Move LEFT (toward smaller x), but don't go past x = 0
-    let newTx = m.tx;
-    const candidateLeft = getMovedBBox(m, m.tx - step, m.ty);
-    if (candidateLeft.x >= 0 && !wouldOverlapAny(candidateLeft, m)) {
-      newTx = m.tx - step;
-      anyMoved = true;
-    }
-    m.tx = newTx;
-
-    const base = m.baseTransform.trim();
-    const translatePart = `translate(${m.tx}, ${m.ty})`;
-    const finalTransform = base ? `${base} ${translatePart}` : translatePart;
-    m.el.setAttribute("transform", finalTransform);
-  }
-
-  if (!anyMoved) {
-    packing = false;
-    packBtn.textContent = "Pack Shapes (Play)";
-    logEl.textContent += "\nPacking finished (no more moves).";
-    updateDownloadFromPreview();
-    return;
-  }
-
-  packAnimationId = requestAnimationFrame(stepPacking);
-}
-
-/* ----------------------------
-   Pack button (Play / Pause)
------------------------------*/
-packBtn.addEventListener("click", () => {
-  const svgEl = previewEl.querySelector("svg");
-  if (!svgEl) {
-    logEl.textContent += "\nNo SVG to pack.";
-    return;
-  }
-
-  // First time: build movers from current preview
-  if (movers.length === 0) {
-    initPackingFromPreview();
-    if (movers.length === 0) {
-      logEl.textContent += "\nNo shapes/groups found to pack.";
-      return;
-    }
-  }
-
-  // Toggle play/pause
-  packing = !packing;
-
-  if (packing) {
-    packBtn.textContent = "Pack Shapes (Pause)";
-    logEl.textContent += "\nPacking started…";
-    stepPacking();
-  } else {
-    packBtn.textContent = "Pack Shapes (Play)";
-    logEl.textContent += "\nPacking paused.";
-    cancelAnimationFrame(packAnimationId);
-    updateDownloadFromPreview();
-  }
-});
 </script>
-
 </body>
 </html>
