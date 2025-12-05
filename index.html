@@ -596,7 +596,8 @@ function moverMouseUp(e) {
 }
 
 function snapMoverToNeighbours(m) {
-  const snapTol = 15; // bigger snap radius
+  const snapTol = 20; // bigger snap radius
+
   const mBox = {
     x: m.baseBBox.x + m.tx,
     y: m.baseBBox.y + m.ty,
@@ -608,9 +609,29 @@ function snapMoverToNeighbours(m) {
   const mTop = mBox.y;
   const mBottom = mBox.y + mBox.height;
 
-  const candidates = [];
+  // best candidates per axis
+  let bestDx = 0, bestDxScore = Infinity;
+  let bestDy = 0, bestDyScore = Infinity;
 
-  // Snaps to other movers (preferred)
+  // helper scorers
+  const scoreX = (d, kind) => {
+    let s = Math.abs(d);
+    // prefer shapes over sheet, then leftwards movement
+    if (kind === "shape") s -= 1.0;
+    if (kind === "sheet") s -= 0.3;
+    if (d < 0) s -= 0.2;    // favour left
+    return s;
+  };
+
+  const scoreY = (d, kind) => {
+    let s = Math.abs(d);
+    if (kind === "shape") s -= 1.0;
+    if (kind === "sheet") s -= 0.3;
+    if (d < 0) s -= 0.2;    // favour up
+    return s;
+  };
+
+  // ---- snaps to other movers (preferred) ----
   movers.forEach(n => {
     if (n === m) return;
     const nBox = {
@@ -624,54 +645,61 @@ function snapMoverToNeighbours(m) {
     const nTop = nBox.y;
     const nBottom = nBox.y + nBox.height;
 
-    let d = nLeft - mRight;
-    if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "shape"});
-    d = nRight - mLeft;
-    if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "shape"});
+    // X axis: right->left, left->right
+    let dX = nLeft - mRight;
+    if (Math.abs(dX) < snapTol) {
+      const s = scoreX(dX, "shape");
+      if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
+    }
+    dX = nRight - mLeft;
+    if (Math.abs(dX) < snapTol) {
+      const s = scoreX(dX, "shape");
+      if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
+    }
 
-    d = nTop - mBottom;
-    if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "shape"});
-    d = nBottom - mTop;
-    if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "shape"});
+    // Y axis: bottom->top, top->bottom
+    let dY = nTop - mBottom;
+    if (Math.abs(dY) < snapTol) {
+      const s = scoreY(dY, "shape");
+      if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
+    }
+    dY = nBottom - mTop;
+    if (Math.abs(dY) < snapTol) {
+      const s = scoreY(dY, "shape");
+      if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
+    }
   });
 
-  // Snaps to sheet boundaries (secondary)
-  let d = 0 - mLeft;
-  if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "sheet"});
-  d = 0 - mTop;
-  if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "sheet"});
-  d = sheetW - mRight;
-  if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "sheet"});
-  d = sheetH - mBottom;
-  if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "sheet"});
-
-  if (!candidates.length) return;
-
-  function score(c) {
-    const dist = Math.abs(c.dx) + Math.abs(c.dy);
-    let bias = 0;
-    // prefer snapping to other shapes over sheet edges
-    if (c.kind === "shape") bias -= 1.0;
-    if (c.kind === "sheet") bias -= 0.3;
-    // prefer up/left
-    if (c.dx < 0) bias -= 0.2;
-    if (c.dy < 0) bias -= 0.2;
-    return dist + bias;
+  // ---- snaps to sheet boundaries (secondary) ----
+  // X axis
+  let dX = 0 - mLeft;          // left edge
+  if (Math.abs(dX) < snapTol) {
+    const s = scoreX(dX, "sheet");
+    if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
+  }
+  dX = sheetW - mRight;        // right edge
+  if (Math.abs(dX) < snapTol) {
+    const s = scoreX(dX, "sheet");
+    if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
   }
 
-  let best = candidates[0];
-  let bestScore = score(best);
-
-  for (const c of candidates.slice(1)) {
-    const s = score(c);
-    if (s < bestScore) {
-      bestScore = s;
-      best = c;
-    }
+  // Y axis
+  let dY = 0 - mTop;           // top edge
+  if (Math.abs(dY) < snapTol) {
+    const s = scoreY(dY, "sheet");
+    if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
+  }
+  dY = sheetH - mBottom;       // bottom edge
+  if (Math.abs(dY) < snapTol) {
+    const s = scoreY(dY, "sheet");
+    if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
   }
 
-  m.tx += best.dx;
-  m.ty += best.dy;
+  // ---- apply both axes together ----
+  if (bestDxScore < Infinity || bestDyScore < Infinity) {
+    m.tx += bestDx;
+    m.ty += bestDy;
+  }
 }
 
 /* ---------- resizable sheet (bottom-right drag handle) ---------- */
