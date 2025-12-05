@@ -54,11 +54,11 @@
 <div id="out"></div>
 
 <div class="info">
-  <strong>Smart packing rules (exactly what laser cutters need):</strong>
+  <strong>Smart packing rules (MaxRects-style):</strong>
   <ul>
-    <li>Any &lt;image&gt; + its overlapping/connected shapes act as one rigid piece</li>
-    <li>All overlapping or touching shapes/images merge into a single mover</li>
-    <li>Everything slides up then left until bounding boxes just touch</li>
+    <li>Shapes/images/text that touch or overlap are fused into a single mover</li>
+    <li>Each mover is packed as a rectangle into the sheet using free-rectangles</li>
+    <li>Big pieces go down first, small pieces tuck into remaining gaps</li>
     <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
   </ul>
   100% offline • Works with multiple files • Battle-tested
@@ -67,6 +67,8 @@
 <script>
 let movers = [];
 let finalSVG = null;
+let sheetW = 600;
+let sheetH = 400;
 
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('files');
@@ -125,17 +127,15 @@ function safeBBox(node) {
 /* ---------- process & clean all SVGs into a master SVG ---------- */
 
 async function processAll() {
-  const W = +document.getElementById('w').value || 600;
-  const H = +document.getElementById('h').value || 400;
+  sheetW = +document.getElementById('w').value || 600;
+  sheetH = +document.getElementById('h').value || 400;
   const contrast = +document.getElementById('contrast').value;
 
-  // MASTER SVG (this will be attached to DOM and used for packing)
   const master = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  master.setAttribute("width", W + "mm");
-  master.setAttribute("height", H + "mm");
-  master.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  master.setAttribute("width", sheetW + "mm");
+  master.setAttribute("height", sheetH + "mm");
+  master.setAttribute("viewBox", `0 0 ${sheetW} ${sheetH}`);
 
-  // collect & clean all files
   for (const file of fileInput.files) {
     if (!file.name.toLowerCase().endsWith('.svg')) continue;
     const text = await file.text();
@@ -180,7 +180,6 @@ async function processAll() {
             ctx.filter = `grayscale(100%) contrast(${contrast})`;
             ctx.drawImage(i, 0, 0);
 
-            // threshold near-white to transparent
             const imgData = ctx.getImageData(0,0,c.width,c.height);
             const d = imgData.data;
             for (let j=0; j<d.length; j+=4) {
@@ -203,7 +202,6 @@ async function processAll() {
     });
   }
 
-  // Attach MASTER to DOM so getBBox() works
   out.innerHTML = '';
   master.style.maxWidth = "100%";
   master.style.height = "auto";
@@ -225,7 +223,7 @@ function isShapeOrImage(el) {
   const tag = el.tagName.toLowerCase();
   return [
     "path", "rect", "circle", "ellipse",
-    "polygon", "polyline", "image"
+    "polygon", "polyline", "image", "text"
   ].includes(tag);
 }
 
@@ -242,7 +240,7 @@ function stripEditorAttrs(svgEl) {
   });
 }
 
-/* Push all group transforms down onto shapes/images. */
+/* Push all group transforms down onto shapes/images/text. */
 function propagateTransforms(rootContainer) {
   function recurse(node, accumulated) {
     const own = node.getAttribute("transform") || "";
@@ -265,15 +263,14 @@ function propagateTransforms(rootContainer) {
 
   recurse(rootContainer, "");
 
-  // Clear transform attributes from groups
   const groups = rootContainer.querySelectorAll("g");
   groups.forEach(g => g.removeAttribute("transform"));
 }
 
-/* Move all shapes/images to rootContainer & remove internal groups. */
+/* Move all shapes/images/text to rootContainer & remove internal groups. */
 function explodeGroupsToShapes(rootContainer) {
   const shapes = Array.from(
-    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image")
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image, text")
   );
 
   shapes.forEach(el => {
@@ -288,7 +285,6 @@ function explodeGroupsToShapes(rootContainer) {
 
 /* Merge movers whose bboxes touch or overlap (touch counts as overlap). */
 function bboxesOverlap(a, b) {
-  // Treat touching edges as overlapping
   return !(
     a.x + a.width  < b.x ||
     b.x + b.width  < a.x ||
@@ -312,15 +308,14 @@ function unionBBox(a, b) {
   };
 }
 
-/* Build movers from overlapping/touching shapes & images. */
+/* Build movers from overlapping/touching shapes, images, and text. */
 function buildMoversFromOverlap(rootContainer) {
   movers = [];
 
   const allShapes = Array.from(
-    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image")
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, image, text")
   );
 
-  // Initial movers: one per element
   allShapes.forEach(el => {
     const bb = safeBBox(el);
     if (!bb) return;
@@ -336,7 +331,6 @@ function buildMoversFromOverlap(rootContainer) {
     });
   });
 
-  // Merge movers whose bounding boxes touch/overlap
   let changed = true;
   while (changed) {
     changed = false;
@@ -345,7 +339,6 @@ function buildMoversFromOverlap(rootContainer) {
         const a = movers[i];
         const b = movers[j];
         if (bboxesOverlap(a.baseBBox, b.baseBBox)) {
-          // merge b into a
           a.members = a.members.concat(b.members);
           b.members.forEach(el => {
             if (!a.memberBaseTransforms.has(el)) {
@@ -362,79 +355,120 @@ function buildMoversFromOverlap(rootContainer) {
   }
 }
 
-/* Packing: move each mover up, then left, using only bounding boxes. */
+/* ---------- MaxRects-style free-rectangle packing ---------- */
 
-function getMovedBBox(mover, tx, ty) {
-  return {
-    x: mover.baseBBox.x + tx,
-    y: mover.baseBBox.y + ty,
-    width: mover.baseBBox.width,
-    height: mover.baseBBox.height
-  };
+// Remove any free rect that is fully contained in another
+function pruneFreeRects(freeRects) {
+  for (let i = 0; i < freeRects.length; i++) {
+    const a = freeRects[i];
+    for (let j = 0; j < freeRects.length; j++) {
+      if (i === j) continue;
+      const b = freeRects[j];
+      if (a.x >= b.x &&
+          a.y >= b.y &&
+          a.x + a.width  <= b.x + b.width &&
+          a.y + a.height <= b.y + b.height) {
+        freeRects.splice(i, 1);
+        i--;
+        break;
+      }
+    }
+  }
 }
 
-function packOnce() {
+/* Place movers as rectangles inside sheet via free-rectangles. */
+function packWithFreeRects() {
   if (!movers.length) return;
 
-  // Sort by base top-left (closest to (0,0) first)
-  const sorted = [...movers].sort((a, b) => {
-    const ba = a.baseBBox;
-    const bb = b.baseBBox;
-    return (ba.y + ba.x) - (bb.y + bb.x);
+  // Sort movers by area descending (big pieces first)
+  movers.sort((a, b) => {
+    const aa = a.baseBBox.width * a.baseBBox.height;
+    const bb = b.baseBBox.width * b.baseBBox.height;
+    return bb - aa;
   });
 
-  const placed = [];
+  // Initial free space is the whole sheet
+  const freeRects = [{
+    x: 0,
+    y: 0,
+    width: sheetW,
+    height: sheetH
+  }];
 
-  for (const m of sorted) {
-    let tx = 0;
-    let ty = 0;
-    let box = getMovedBBox(m, tx, ty);
+  for (const m of movers) {
+    const w = m.baseBBox.width;
+    const h = m.baseBBox.height;
 
-    // 1) Move UP as far as possible (y >= 0, no collision with placed)
-    let maxUp = box.y;
-    for (const p of placed) {
-      const pb = getMovedBBox(p, p.tx, p.ty);
+    let bestRectIndex = -1;
+    let bestScore = Infinity;
+    let bestX = 0;
+    let bestY = 0;
 
-      const horizOverlap =
-        pb.x < box.x + box.width && box.x < pb.x + pb.width;
-      if (!horizOverlap) continue;
-
-      if (pb.y + pb.height <= box.y) {
-        const allowed = box.y - (pb.y + pb.height);
-        if (allowed < maxUp && allowed >= 0) {
-          maxUp = allowed;
+    // Find best free rect this mover can fit into
+    for (let i = 0; i < freeRects.length; i++) {
+      const fr = freeRects[i];
+      if (w <= fr.width && h <= fr.height) {
+        // Simple score: leftover area after placement
+        const leftoverW = fr.width - w;
+        const leftoverH = fr.height - h;
+        const score = leftoverW * leftoverH;
+        if (score < bestScore) {
+          bestScore = score;
+          bestRectIndex = i;
+          bestX = fr.x;
+          bestY = fr.y;
         }
       }
     }
 
-    ty -= maxUp;
-    box = getMovedBBox(m, tx, ty);
-
-    // 2) Move LEFT as far as possible (x >= 0, no collision with placed)
-    let maxLeft = box.x;
-    for (const p of placed) {
-      const pb = getMovedBBox(p, p.tx, p.ty);
-
-      const vertOverlap =
-        pb.y < box.y + box.height && box.y < pb.y + pb.height;
-      if (!vertOverlap) continue;
-
-      if (pb.x + pb.width <= box.x) {
-        const allowed = box.x - (pb.x + pb.width);
-        if (allowed < maxLeft && allowed >= 0) {
-          maxLeft = allowed;
-        }
-      }
+    if (bestRectIndex === -1) {
+      // No free rect could hold it; fallback: leave in original position
+      // tx,ty = 0 in this case
+      continue;
     }
 
-    tx -= maxLeft;
+    const fr = freeRects[bestRectIndex];
 
-    m.tx = tx;
-    m.ty = ty;
-    placed.push(m);
+    // Place mover at (bestX, bestY)
+    m.tx = bestX - m.baseBBox.x;
+    m.ty = bestY - m.baseBBox.y;
+
+    // Split the used rect into right & bottom pieces
+    const usedW = w;
+    const usedH = h;
+
+    const newRects = [];
+
+    // Right side
+    const rightW = fr.width - usedW;
+    if (rightW > 0) {
+      newRects.push({
+        x: fr.x + usedW,
+        y: fr.y,
+        width: rightW,
+        height: usedH
+      });
+    }
+
+    // Bottom side
+    const bottomH = fr.height - usedH;
+    if (bottomH > 0) {
+      newRects.push({
+        x: fr.x,
+        y: fr.y + usedH,
+        width: fr.width,
+        height: bottomH
+      });
+    }
+
+    // Remove used rect, add new ones
+    freeRects.splice(bestRectIndex, 1);
+    freeRects.push(...newRects);
+
+    pruneFreeRects(freeRects);
   }
 
-  // Apply same (tx, ty) to each member in each mover
+  // Apply transforms to members based on tx,ty
   movers.forEach(m => {
     m.members.forEach(el => {
       const base = m.memberBaseTransforms.get(el) || "";
@@ -456,27 +490,20 @@ function runPacking() {
   }
 
   const svgEl = finalSVG;
-  const rootContainer = svgEl; // we collected everything directly under master
+  const rootContainer = svgEl;
 
-  // 1) Flatten transforms & groups into shapes
   propagateTransforms(rootContainer);
   explodeGroupsToShapes(rootContainer);
-
-  // 2) Strip editor attributes (Inkscape/sodipodi)
   stripEditorAttrs(svgEl);
-
-  // 3) Build movers based on touching/overlapping shapes/images
   buildMoversFromOverlap(rootContainer);
 
   if (!movers.length) {
-    alert("No shapes/images found to pack.");
+    alert("No shapes/images/text found to pack.");
     return;
   }
 
-  // 4) Pack once
-  packOnce();
+  packWithFreeRects();
 
-  // 5) Update UI
   alert("Packing complete.");
   packBtn.disabled = true;
   packBtn.textContent = "Packing Complete!";
