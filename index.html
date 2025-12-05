@@ -13,7 +13,7 @@
   }
   .drop.dragover {border-color:#c00; background:#ffe5e5;}
   .controls {
-    background:#fff; padding:30px; border-radius:16px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.08);
+    background:#fff; padding:30px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.08);
   }
   button {
     padding:16px 36px; margin:12px; font-size:18px; border:none; border-radius:12px; cursor:pointer; font-weight:bold;
@@ -25,6 +25,9 @@
   .slider {margin:20px 0; font-size:1.1em;}
   #out svg {max-width:100%; height:auto; background:white; border:3px solid #c00; border-radius:12px; box-shadow:0 10px 40px rgba(0,0,0,0.15);}
   .info {margin-top:40px; background:#f0f0f0; padding:20px; border-radius:12px; font-size:0.95em;}
+
+  .mover-member { cursor: move; }
+  .resize-handle { cursor: se-resize; }
 </style>
 </head>
 <body>
@@ -54,11 +57,11 @@
 <div id="out"></div>
 
 <div class="info">
-  <strong>Smart packing rules (shelf layout):</strong>
+  <strong>Smart packing rules (bottom-left layout):</strong>
   <ul>
     <li>Shapes/images/text that touch or overlap are fused into a single rigid mover</li>
-    <li>Movers are treated as rectangles and placed in rows from top-left, like shelves</li>
-    <li>Each row is filled left→right; new rows start directly underneath</li>
+    <li>Movers are treated as rectangles and placed bottom-left, filling gaps better</li>
+    <li>Strong snapping to neighbours and sheet edges (prefers up/left and shapes)</li>
     <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
   </ul>
   100% offline • Works with multiple files • Battle-tested
@@ -70,14 +73,16 @@ let finalSVG = null;
 let sheetW = 600;
 let sheetH = 400;
 
+let nextMoverId = 0;
+
 const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('files');
-const goBtn = document.getElementById('go');
-const packBtn = document.getElementById('pack');
-const dlBtn = document.getElementById('dl');
-const resetBtn = document.getElementById('reset');
+const fileInput  = document.getElementById('files');
+const goBtn      = document.getElementById('go');
+const packBtn    = document.getElementById('pack');
+const dlBtn      = document.getElementById('dl');
+const resetBtn   = document.getElementById('reset');
 const contrastSlider = document.getElementById('contrast');
-const contrastLabel = document.getElementById('cVal');
+const contrastLabel  = document.getElementById('cVal');
 const out = document.getElementById('out');
 
 dropZone.onclick = () => fileInput.click();
@@ -95,10 +100,23 @@ dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
 
 contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
 
-goBtn.onclick = processAll;
-packBtn.onclick = runPacking;
-dlBtn.onclick = downloadFinal;
+goBtn.onclick   = processAll;
+packBtn.onclick = () => doPacking(false, false);
+dlBtn.onclick   = downloadFinal;
 resetBtn.onclick = () => location.reload();
+
+/* ---------- shared helpers ---------- */
+
+function clientToSVG(svg, clientX, clientY) {
+  const pt = svg.createSVGPoint();
+  pt.x = clientX;
+  pt.y = clientY;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return { x: 0, y: 0 };
+  const inv = ctm.inverse();
+  const svgPt = pt.matrixTransform(inv);
+  return { x: svgPt.x, y: svgPt.y };
+}
 
 /* ---------- file loading ---------- */
 
@@ -139,8 +157,8 @@ async function processAll() {
   for (const file of fileInput.files) {
     if (!file.name.toLowerCase().endsWith('.svg')) continue;
     const text = await file.text();
-    const doc = new DOMParser().parseFromString(text, "image/svg+xml");
-    const svg = doc.querySelector('svg');
+    const doc  = new DOMParser().parseFromString(text, "image/svg+xml");
+    const svg  = doc.querySelector('svg');
     if (!svg) continue;
 
     // Simple translate baker (only handles translate())
@@ -157,13 +175,15 @@ async function processAll() {
       }
     });
 
-    // Fix red lines (force pure red, fully opaque, no fill)
+    // Fix red lines (255,0,0, fully opaque, no fill, 0.25mm, non-scaling)
     svg.querySelectorAll('*').forEach(el => {
       const stroke = (el.getAttribute('stroke') || '').toLowerCase();
       if (/ff0000|red|#f00|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\)/.test(stroke)) {
         el.setAttribute('stroke', '#ff0000');
         el.setAttribute('stroke-opacity', '1');
         el.setAttribute('fill', 'none');
+        el.setAttribute('stroke-width', '0.25');
+        el.setAttribute('vector-effect', 'non-scaling-stroke');
       }
     });
 
@@ -204,11 +224,18 @@ async function processAll() {
 
   out.innerHTML = '';
   master.style.maxWidth = "100%";
-  master.style.height = "auto";
+  master.style.height   = "auto";
   out.appendChild(master);
 
   finalSVG = master;
-  movers = [];
+  movers   = [];
+  nextMoverId = 0;
+
+  addResizeHandle();
+
+  finalSVG.addEventListener('mousedown', e => {
+    if (e.target === finalSVG) setSelectedMover(null);
+  });
 
   alert("All SVGs processed & cleaned.\nNow click “Start Smart Packing →” to pack them.");
 
@@ -220,6 +247,7 @@ async function processAll() {
 
 function isShapeOrImage(el) {
   if (!el || el.nodeType !== 1) return false;
+  if (el.id === 'resizeHandle') return false;
   const tag = el.tagName.toLowerCase();
   return [
     "path", "rect", "circle", "ellipse",
@@ -229,10 +257,8 @@ function isShapeOrImage(el) {
 }
 
 function stripEditorAttrs(svgEl) {
-  const all = svgEl.querySelectorAll("*");
-  all.forEach(el => {
-    const attrs = Array.from(el.attributes);
-    attrs.forEach(attr => {
+  svgEl.querySelectorAll("*").forEach(el => {
+    Array.from(el.attributes).forEach(attr => {
       if (attr.name.startsWith("inkscape:") ||
           attr.name.startsWith("sodipodi:")) {
         el.removeAttribute(attr.name);
@@ -241,7 +267,6 @@ function stripEditorAttrs(svgEl) {
   });
 }
 
-/* Push all group transforms down onto shapes/images/text. */
 function propagateTransforms(rootContainer) {
   function recurse(node, accumulated) {
     const own = node.getAttribute("transform") || "";
@@ -249,9 +274,7 @@ function propagateTransforms(rootContainer) {
       ? (own ? (accumulated + " " + own) : accumulated)
       : own;
 
-    Array.from(node.children).forEach(child => {
-      recurse(child, combined);
-    });
+    Array.from(node.children).forEach(child => recurse(child, combined));
 
     if (isShapeOrImage(node)) {
       if (combined && combined.trim() !== "") {
@@ -261,30 +284,23 @@ function propagateTransforms(rootContainer) {
       }
     }
   }
-
   recurse(rootContainer, "");
 
-  const groups = rootContainer.querySelectorAll("g");
-  groups.forEach(g => g.removeAttribute("transform"));
+  rootContainer.querySelectorAll("g").forEach(g => g.removeAttribute("transform"));
 }
 
-/* Move all shapes/images/text to rootContainer & remove internal groups. */
 function explodeGroupsToShapes(rootContainer) {
   const shapes = Array.from(
     rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
   );
-
   shapes.forEach(el => {
     if (el.parentElement !== rootContainer) {
       rootContainer.appendChild(el);
     }
   });
-
-  const groups = Array.from(rootContainer.querySelectorAll("g"));
-  groups.forEach(g => g.remove());
+  Array.from(rootContainer.querySelectorAll("g")).forEach(g => g.remove());
 }
 
-/* Merge movers whose bboxes touch or overlap (touch counts as overlap). */
 function bboxesOverlap(a, b) {
   return !(
     a.x + a.width  < b.x ||
@@ -301,29 +317,33 @@ function unionBBox(a, b) {
   const minY = Math.min(a.y, b.y);
   const maxX = Math.max(a.x + a.width,  b.x + b.width);
   const maxY = Math.max(a.y + a.height, b.y + b.height);
-  return {
-    x: minX,
-    y: minY,
-    width: maxX - minX,
-    height: maxY - minY
-  };
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
+
+/* selection + dragging state */
+let selectedMover = null;
+let dragState = null;
+
+function setSelectedMover(m) { selectedMover = m; }
 
 /* Build movers from overlapping/touching shapes, images, and text. */
 function buildMoversFromOverlap(rootContainer) {
   movers = [];
+  nextMoverId = 0;
 
   const allShapes = Array.from(
     rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
   );
 
   allShapes.forEach(el => {
+    if (!isShapeOrImage(el)) return;
     const bb = safeBBox(el);
     if (!bb) return;
     const baseBBox = { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
     const mbt = new Map();
     mbt.set(el, el.getAttribute("transform") || "");
     movers.push({
+      id: nextMoverId++,
       members: [el],
       baseBBox,
       memberBaseTransforms: mbt,
@@ -354,119 +374,416 @@ function buildMoversFromOverlap(rootContainer) {
       }
     }
   }
+
+  movers.forEach(m => {
+    m.members.forEach(el => {
+      el.classList.add('mover-member');
+      el.dataset.moverId = String(m.id);
+      el.setAttribute('pointer-events', 'bounding-box');
+      el.onmousedown = moverMouseDown;
+    });
+  });
 }
 
-/* ---------- Improved Shelf (row) packing: offline + Best Width Fit ---------- */
+/* ---------- Bottom-left packing (fills gaps better than rows) ---------- */
 
-function packShelf() {
+function packBottomLeft() {
   if (!movers.length) return;
 
-  // 1) Offline sort by descending area (width * height)
-  movers.sort((a, b) => {
+  // Sort by area (big first)
+  const order = movers.slice().sort((a,b) => {
     const areaA = a.baseBBox.width * a.baseBBox.height;
     const areaB = b.baseBBox.width * b.baseBBox.height;
     return areaB - areaA;
   });
 
-  const remaining = [...movers];
-  let cursorY = 0;
-  const sheetWidth = sheetW;
+  const placed = [];
 
-  // Build rows from top to bottom
-  while (remaining.length) {
-    let cursorX = 0;
-    let rowHeight = 0;
+  for (const m of order) {
+    const w = m.baseBBox.width;
+    const h = m.baseBBox.height;
 
-    // Fill one row left → right
-    while (remaining.length) {
-      const spaceLeft = sheetWidth - cursorX;
+    // Candidate X positions: 0 and all right edges of placed boxes
+    const xs = [0];
+    placed.forEach(p => {
+      const xCandidate = p.x + p.width;
+      if (xCandidate + w <= sheetW + 1e-6) xs.push(xCandidate);
+    });
 
-      // Movers that still fit in this row
-      const candidates = remaining.filter(m => m.baseBBox.width <= spaceLeft);
+    let bestX = 0, bestY = Infinity;
 
-      if (!candidates.length) break;
-
-      // 2) Best Width Fit: smallest leftover gap in this row
-      let best = candidates[0];
-      let bestGap = spaceLeft - best.baseBBox.width;
-
-      for (const m of candidates) {
-        const gap = spaceLeft - m.baseBBox.width;
-        if (gap < bestGap) {
-          best = m;
-          bestGap = gap;
+    xs.forEach(x => {
+      let y = 0;
+      // minimal y such that we don't overlap any placed box horizontally overlapping
+      placed.forEach(p => {
+        const overlapX = !(x + w <= p.x || p.x + p.width <= x);
+        if (overlapX) {
+          y = Math.max(y, p.y + p.height);
         }
+      });
+      // choose candidate with lowest y, then leftmost x
+      if (y < bestY || (y === bestY && x < bestX)) {
+        bestY = y;
+        bestX = x;
       }
+    });
 
-      // Place best mover so its bbox top-left is at (cursorX, cursorY)
-      best.tx = cursorX - best.baseBBox.x;
-      best.ty = cursorY - best.baseBBox.y;
+    m.tx = bestX - m.baseBBox.x;
+    m.ty = bestY - m.baseBBox.y;
 
-      cursorX += best.baseBBox.width;
-      rowHeight = Math.max(rowHeight, best.baseBBox.height);
-
-      const idx = remaining.indexOf(best);
-      if (idx !== -1) remaining.splice(idx, 1);
-    }
-
-    // Next row
-    cursorY += rowHeight;
+    placed.push({ x: bestX, y: bestY, width: w, height: h, mover: m });
   }
 
-  // 3) Apply transforms to all members of each mover
-  movers.forEach(m => {
-    m.members.forEach(el => {
-      const base = m.memberBaseTransforms.get(el) || "";
-      const translatePart = `translate(${m.tx}, ${m.ty})`;
-      const finalTransform = base
-        ? `${base} ${translatePart}`
-        : translatePart;
-      el.setAttribute("transform", finalTransform.trim());
-    });
+  movers.forEach(m => applyMoverTransform(m));
+}
+
+function applyMoverTransform(m) {
+  m.members.forEach(el => {
+    const base = m.memberBaseTransforms.get(el) || "";
+    const translatePart = `translate(${m.tx}, ${m.ty})`;
+    const finalTransform = base
+      ? `${base} ${translatePart}`
+      : translatePart;
+    el.setAttribute("transform", finalTransform.trim());
   });
 }
 
-/* ---------- Run packing on current master SVG ---------- */
+/* ---------- fit whole layout into sheet if possible ---------- */
 
-function runPacking() {
+function fitLayoutIntoSheet() {
+  if (!movers.length) return true;
+
+  let minX = Infinity, minY = Infinity;
+  let maxX = -Infinity, maxY = -Infinity;
+
+  movers.forEach(m => {
+    const x = m.baseBBox.x + (m.tx || 0);
+    const y = m.baseBBox.y + (m.ty || 0);
+    const w = m.baseBBox.width;
+    const h = m.baseBBox.height;
+
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x + w > maxX) maxX = x + w;
+    if (y + h > maxY) maxY = y + h;
+  });
+
+  const usedW = maxX - minX;
+  const usedH = maxY - minY;
+
+  const canFit = (usedW <= sheetW && usedH <= sheetH);
+
+  const shiftX = -minX;
+  const shiftY = -minY;
+
+  movers.forEach(m => {
+    m.tx += shiftX;
+    m.ty += shiftY;
+    applyMoverTransform(m);
+  });
+
+  return canFit;
+}
+
+/* ---------- packing orchestration ---------- */
+
+function doPacking(silent = false, fromResize = false) {
   if (!finalSVG) {
-    alert("No SVG loaded yet.");
+    if (!silent) alert("No SVG loaded yet.");
     return;
   }
 
   const svgEl = finalSVG;
   const rootContainer = svgEl;
 
+  // Full rebuild from DOM (for initial pack / button repack)
   propagateTransforms(rootContainer);
   explodeGroupsToShapes(rootContainer);
   stripEditorAttrs(svgEl);
   buildMoversFromOverlap(rootContainer);
 
   if (!movers.length) {
-    alert("No shapes/images/text found to pack.");
+    if (!silent) alert("No shapes/images/text found to pack.");
     return;
   }
 
-  packShelf();
+  packBottomLeft();
+  const canFit = fitLayoutIntoSheet();
 
-  alert("Packing complete.");
-  packBtn.disabled = true;
-  packBtn.textContent = "Packing Complete!";
+  if (fromResize && !canFit && !silent) {
+    alert("Sheet is too small for all parts; some will extend beyond the boundary.");
+  }
+
+  if (!silent) {
+    alert("Packing complete.");
+    packBtn.textContent = "Re-pack Now";
+  }
+
+  updateResizeHandle();
+}
+
+/* Re-pack only using existing movers (for resize; no DOM rebuild) */
+function repackExisting(silent = true, fromResize = true) {
+  if (!movers.length) return;
+  packBottomLeft();
+  const canFit = fitLayoutIntoSheet();
+  if (fromResize && !canFit && !silent) {
+    alert("Sheet is too small for all parts; some will extend beyond the boundary.");
+  }
+  updateResizeHandle();
+}
+
+/* ---------- mover dragging + snapping ---------- */
+
+function moverMouseDown(e) {
+  if (!finalSVG) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  const el = e.currentTarget;
+  const id = +el.dataset.moverId;
+  const m = movers.find(mm => mm.id === id);
+  if (!m) return;
+
+  setSelectedMover(m);
+
+  const mouseSVG = clientToSVG(finalSVG, e.clientX, e.clientY);
+
+  const curBox = {
+    x: m.baseBBox.x + (m.tx || 0),
+    y: m.baseBBox.y + (m.ty || 0)
+  };
+
+  dragState = {
+    mover: m,
+    mouseOffset: {
+      x: mouseSVG.x - curBox.x,
+      y: mouseSVG.y - curBox.y
+    }
+  };
+
+  window.addEventListener('mousemove', moverMouseMove);
+  window.addEventListener('mouseup', moverMouseUp);
+}
+
+function moverMouseMove(e) {
+  if (!dragState || !finalSVG) return;
+  e.preventDefault();
+
+  const mouseSVG = clientToSVG(finalSVG, e.clientX, e.clientY);
+  const m = dragState.mover;
+
+  const boxX = mouseSVG.x - dragState.mouseOffset.x;
+  const boxY = mouseSVG.y - dragState.mouseOffset.y;
+
+  m.tx = boxX - m.baseBBox.x;
+  m.ty = boxY - m.baseBBox.y;
+
+  applyMoverTransform(m);
+}
+
+function moverMouseUp(e) {
+  if (!dragState) return;
+  e.preventDefault();
+
+  const m = dragState.mover;
+  snapMoverToNeighbours(m);
+  applyMoverTransform(m);
+
+  dragState = null;
+  window.removeEventListener('mousemove', moverMouseMove);
+  window.removeEventListener('mouseup', moverMouseUp);
+}
+
+function snapMoverToNeighbours(m) {
+  const snapTol = 15; // bigger snap radius
+  const mBox = {
+    x: m.baseBBox.x + m.tx,
+    y: m.baseBBox.y + m.ty,
+    width: m.baseBBox.width,
+    height: m.baseBBox.height
+  };
+  const mLeft = mBox.x;
+  const mRight = mBox.x + mBox.width;
+  const mTop = mBox.y;
+  const mBottom = mBox.y + mBox.height;
+
+  const candidates = [];
+
+  // Snaps to other movers (preferred)
+  movers.forEach(n => {
+    if (n === m) return;
+    const nBox = {
+      x: n.baseBBox.x + (n.tx || 0),
+      y: n.baseBBox.y + (n.ty || 0),
+      width: n.baseBBox.width,
+      height: n.baseBBox.height
+    };
+    const nLeft = nBox.x;
+    const nRight = nBox.x + nBox.width;
+    const nTop = nBox.y;
+    const nBottom = nBox.y + nBox.height;
+
+    let d = nLeft - mRight;
+    if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "shape"});
+    d = nRight - mLeft;
+    if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "shape"});
+
+    d = nTop - mBottom;
+    if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "shape"});
+    d = nBottom - mTop;
+    if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "shape"});
+  });
+
+  // Snaps to sheet boundaries (secondary)
+  let d = 0 - mLeft;
+  if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "sheet"});
+  d = 0 - mTop;
+  if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "sheet"});
+  d = sheetW - mRight;
+  if (Math.abs(d) < snapTol) candidates.push({dx: d, dy: 0, kind: "sheet"});
+  d = sheetH - mBottom;
+  if (Math.abs(d) < snapTol) candidates.push({dx: 0, dy: d, kind: "sheet"});
+
+  if (!candidates.length) return;
+
+  function score(c) {
+    const dist = Math.abs(c.dx) + Math.abs(c.dy);
+    let bias = 0;
+    // prefer snapping to other shapes over sheet edges
+    if (c.kind === "shape") bias -= 1.0;
+    if (c.kind === "sheet") bias -= 0.3;
+    // prefer up/left
+    if (c.dx < 0) bias -= 0.2;
+    if (c.dy < 0) bias -= 0.2;
+    return dist + bias;
+  }
+
+  let best = candidates[0];
+  let bestScore = score(best);
+
+  for (const c of candidates.slice(1)) {
+    const s = score(c);
+    if (s < bestScore) {
+      bestScore = s;
+      best = c;
+    }
+  }
+
+  m.tx += best.dx;
+  m.ty += best.dy;
+}
+
+/* ---------- resizable sheet (bottom-right drag handle) ---------- */
+
+let resizeState = null;
+
+function addResizeHandle() {
+  if (!finalSVG) return;
+  let handle = finalSVG.querySelector('#resizeHandle');
+  if (!handle) {
+    handle = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    handle.id = 'resizeHandle';
+    handle.classList.add('resize-handle');
+    handle.setAttribute('width', 8);
+    handle.setAttribute('height', 8);
+    handle.setAttribute('fill', '#c00');
+    handle.setAttribute('stroke', '#c00');
+    handle.setAttribute('stroke-width', '0.5');
+    handle.style.cursor = 'se-resize';
+    finalSVG.appendChild(handle);
+    handle.addEventListener('mousedown', startSheetResize);
+  }
+  updateResizeHandle();
+}
+
+function updateResizeHandle() {
+  if (!finalSVG) return;
+  const handle = finalSVG.querySelector('#resizeHandle');
+  if (!handle) return;
+  const size = 8;
+  handle.setAttribute('x', sheetW - size);
+  handle.setAttribute('y', sheetH - size);
+}
+
+function startSheetResize(e) {
+  if (!finalSVG) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  const pt = clientToSVG(finalSVG, e.clientX, e.clientY);
+  resizeState = {
+    startMouse: pt,
+    startW: sheetW,
+    startH: sheetH
+  };
+
+  window.addEventListener('mousemove', doSheetResize);
+  window.addEventListener('mouseup', stopSheetResize);
+}
+
+function doSheetResize(e) {
+  if (!resizeState || !finalSVG) return;
+  e.preventDefault();
+
+  const pt = clientToSVG(finalSVG, e.clientX, e.clientY);
+  const dx = pt.x - resizeState.startMouse.x;
+  const dy = pt.y - resizeState.startMouse.y;
+
+  const minSize = 50;
+  let newW = resizeState.startW + dx;
+  let newH = resizeState.startH + dy;
+
+  newW = Math.max(minSize, newW);
+  newH = Math.max(minSize, newH);
+
+  newW = Math.round(newW / 5) * 5;
+  newH = Math.round(newH / 5) * 5;
+
+  sheetW = newW;
+  sheetH = newH;
+
+  finalSVG.setAttribute('width', sheetW + "mm");
+  finalSVG.setAttribute('height', sheetH + "mm");
+  finalSVG.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
+
+  document.getElementById('w').value = sheetW;
+  document.getElementById('h').value = sheetH;
+
+  updateResizeHandle();
+}
+
+function stopSheetResize(e) {
+  if (!resizeState) return;
+  e.preventDefault();
+  resizeState = null;
+
+  window.removeEventListener('mousemove', doSheetResize);
+  window.removeEventListener('mouseup', stopSheetResize);
+
+  // Re-pack using existing movers only
+  repackExisting(true, true);
 }
 
 /* ---------- download ---------- */
 
 function downloadFinal() {
   if (!finalSVG) return;
+
+  const handle = finalSVG.querySelector('#resizeHandle');
+  if (handle) handle.remove();
+
   const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
               new XMLSerializer().serializeToString(finalSVG);
   const blob = new Blob([xml], {type:'image/svg+xml'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
   a.href = url;
   a.download = 'laser-perfect-packed.svg';
   a.click();
   URL.revokeObjectURL(url);
+
+  addResizeHandle();
 }
 </script>
 </body>
