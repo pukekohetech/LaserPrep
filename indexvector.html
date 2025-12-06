@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Laser SVG Prep — Smart Packing Edition</title>
+<style>
+  body {
+    font-family:Arial,sans-serif;
+    max-width:1100px;
+    margin:40px auto;
+    background:#fafafa;
+    color:#222;
+  }
+  h1 {text-align:center; color:#c00; margin-bottom:8px;}
+  h1 + p {text-align:center; font-size:1.2em; color:#555; margin-top:0;}
+  .drop {
+    border:4px dashed #999; padding:90px; text-align:center; background:#fff;
+    border-radius:16px; margin:30px 0; cursor:pointer; font-size:1.5em; transition:.3s;
+  }
+  .drop.dragover {border-color:#c00; background:#ffe5e5;}
+  .controls {
+    background:#fff; padding:30px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.08);
+  }
+  button {
+    padding:16px 36px; margin:8px; font-size:16px; border:none; border-radius:12px; cursor:pointer; font-weight:bold;
+  }
+  #go {background:#c00; color:white;}
+  #pack {background:#0066cc; color:white;}
+  #vectoriseImages {background:#cc9900; color:white; display:none;}
+  #dlSvg {background:#00a000; color:white; display:none;}
+  #dlPdf {background:#008858; color:white; display:none;}
+  #reset {background:#666; color:white;}
+  .slider {margin:20px 0; font-size:1.1em;}
+
+  /* on-screen SVG preview */
+  #out svg {
+    max-width:100%;
+    height:auto;
+    background:white;
+    border:3px solid #c00;
+    border-radius:12px;
+    box-shadow:0 10px 40px rgba(0,0,0,0.15);
+  }
+
+  .info {
+    margin-top:40px;
+    background:#f0f0f0;
+    padding:20px;
+    border-radius:12px;
+    font-size:0.95em;
+  }
+
+  .mover-member { cursor: move; }
+  .resize-handle { cursor: se-resize; }
+</style>
+</head>
+<body>
+
+<h1>Laser SVG Prep — Smart Packing Edition</h1>
+<p>Drop any number of Inkscape SVGs → perfect red lines, clean engraving images, smart packing, and bitmap-to-vector engravings.</p>
+
+<div class="drop" id="dropZone">Drop SVG files here or click</div>
+<input type="file" id="files" accept=".svg" multiple style="display:none">
+
+<div class="controls">
+  Sheet size 
+  <input type="number" id="w" value="600" style="width:90px"> ×
+  <input type="number" id="h" value="400" style="width:90px"> mm
+  &nbsp;&nbsp;Student name
+  <input type="text" id="studentName" placeholder="Student name" style="width:180px">
+
+  <div class="slider">
+    Engraving contrast <span id="cVal">1.80</span>×
+    <input type="range" id="contrast" min="0.5" max="5" step="0.1" value="1.8">
+  </div>
+
+  <button id="go" disabled>Process & Clean All SVGs</button>
+  <button id="pack" disabled>Start Smart Packing →</button>
+  <button id="vectoriseImages" disabled>Vectorise Images (Trace Bitmap)</button>
+  <button id="dlSvg">Download Final SVG</button>
+  <button id="dlPdf">Download PDF</button>
+  <button id="reset">Reset</button>
+</div>
+
+<div id="out"></div>
+
+<div class="info">
+  <strong>Pipeline:</strong>
+  <ul>
+    <li>Clean + unify pure red cut lines</li>
+    <li>Grayscale + contrast engravings</li>
+    <li>Smart bottom-left packing with snapping and resizable sheet</li>
+    <li><strong>Optional:</strong> Vectorise images (trace bitmap) to paths for lasers that dislike rasters</li>
+    <li>Export SVG or PDF with red cuts forced to <strong>0.026&nbsp;mm</strong></li>
+  </ul>
+</div>
+
+<!-- jsPDF + svg2pdf from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.0/dist/svg2pdf.umd.min.js"></script>
+<!-- ImageTracer.js for bitmap → SVG tracing -->
+<script src="https://cdn.jsdelivr.net/npm/imagetracerjs@1.2.6/imagetracer_v1.2.6.min.js"></script>
+
+<script>
+let movers = [];
+let finalSVG = null;
+let sheetW = 600;
+let sheetH = 400;
+let nextMoverId = 0;
+
+// selection / dragging
+let selectedMover = null;
+let dragState = null;
+
+// sheet resize
+let resizeState = null;
+
+const dropZone       = document.getElementById('dropZone');
+const fileInput      = document.getElementById('files');
+const goBtn          = document.getElementById('go');
+const packBtn        = document.getElementById('pack');
+const vectoriseBtn   = document.getElementById('vectoriseImages');
+const dlSvgBtn       = document.getElementById('dlSvg');
+const dlPdfBtn       = document.getElementById('dlPdf');
+const resetBtn       = document.getElementById('reset');
+const contrastSlider = document.getElementById('contrast');
+const contrastLabel  = document.getElementById('cVal');
+const out            = document.getElementById('out');
+const nameInput      = document.getElementById('studentName');
+
+const DISPLAY_CUT_WIDTH = 0.2;         // visible on screen (mm-equivalent via viewBox)
+const EXPORT_CUT_WIDTH  = '0.026mm';   // true laser hairline for export
+
+dropZone.onclick = () => fileInput.click();
+fileInput.onchange = e => loadFiles(e.target.files);
+
+dropZone.ondragover = e => {
+  e.preventDefault();
+  dropZone.classList.add('dragover');
+};
+dropZone.ondragleave = dropZone.ondrop = e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+};
+dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
+
+contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
+
+goBtn.onclick        = processAll;
+packBtn.onclick      = () => doPacking(false, false);
+vectoriseBtn.onclick = () => vectoriseImages();
+dlSvgBtn.onclick     = downloadFinalSVG;
+dlPdfBtn.onclick     = downloadPDF;
+resetBtn.onclick     = () => location.reload();
+
+/* ---------- helpers ---------- */
+
+function requireStudentName() {
+  const name = nameInput.value.trim();
+  if (!name) {
+    alert("Please enter the student's name before exporting.");
+    nameInput.focus();
+    return null;
+  }
+  return name;
+}
+
+function clientToSVG(svg, clientX, clientY) {
+  const pt = svg.createSVGPoint();
+  pt.x = clientX;
+  pt.y = clientY;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return { x: 0, y: 0 };
+  const inv = ctm.inverse();
+  const svgPt = pt.matrixTransform(inv);
+  return { x: svgPt.x, y: svgPt.y };
+}
+
+async function loadFiles(files) {
+  const svgFiles = [...files].filter(f => f.name.toLowerCase().endsWith('.svg'));
+  if (!svgFiles.length) return;
+  goBtn.disabled = false;
+}
+
+function safeBBox(node) {
+  try {
+    if (typeof node.getBBox === 'function') {
+      const bb = node.getBBox();
+      if (isFinite(bb.x) && isFinite(bb.y) &&
+          isFinite(bb.width) && isFinite(bb.height) &&
+          bb.width > 0 && bb.height > 0) {
+        return bb;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+/* ---------- process & clean all SVGs into a master SVG ---------- */
+
+async function processAll() {
+  sheetW = +document.getElementById('w').value || 600;
+  sheetH = +document.getElementById('h').value || 400;
+  const contrast = +document.getElementById('contrast').value;
+
+  const master = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  master.setAttribute("width", sheetW + "mm");
+  master.setAttribute("height", sheetH + "mm");
+  master.setAttribute("viewBox", `0 0 ${sheetW} ${sheetH}`);
+  master.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  master.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+
+  for (const file of fileInput.files) {
+    if (!file.name.toLowerCase().endsWith('.svg')) continue;
+    const text = await file.text();
+    const doc  = new DOMParser().parseFromString(text, "image/svg+xml");
+    const svg  = doc.querySelector('svg');
+    if (!svg) continue;
+
+    // Simple translate baker (only handles translate())
+    svg.querySelectorAll('*').forEach(el => {
+      const t = el.getAttribute('transform') || '';
+      if (t.includes('translate')) {
+        const m = t.match(/translate\(([^)]+)\)/);
+        if (m) {
+          const [dx, dy = 0] = m[1].split(/[\s,]+/).map(Number);
+          ['x','x1','x2','cx'].forEach(a => { if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dx); });
+          ['y','y1','y2','cy'].forEach(a => { if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dy); });
+        }
+        el.removeAttribute('transform');
+      }
+    });
+
+    // Fix red lines for display + tag for export
+    svg.querySelectorAll('*').forEach(el => {
+      const rawStrokeAttr = el.getAttribute('stroke') || '';
+      const rawStyle      = el.getAttribute('style') || '';
+
+      const strokeAttr = rawStrokeAttr.toLowerCase();
+
+      // Look for stroke colour in style as well
+      let strokeFromStyle = '';
+      const styleLower = rawStyle.toLowerCase();
+      const strokeStyleMatch = styleLower.match(/stroke\s*:\s*([^;]+)/);
+      if (strokeStyleMatch) {
+        strokeFromStyle = strokeStyleMatch[1].trim();
+      }
+
+      const strokeValue = strokeAttr || strokeFromStyle;
+
+      const isRed = /(#ff0000|#f00|\bred\b|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\))/.test(strokeValue);
+      if (!isRed) return;
+
+      // Clean style: remove stroke-related stuff completely
+      if (rawStyle) {
+        const cleaned = rawStyle
+          .split(';')
+          .map(s => s.trim())
+          .filter(chunk =>
+            chunk &&
+            !chunk.startsWith('stroke-width') &&
+            !chunk.startsWith('stroke:') &&
+            !chunk.startsWith('stroke-opacity') &&
+            !chunk.startsWith('fill:')
+          )
+          .join(';');
+        if (cleaned.trim()) el.setAttribute('style', cleaned);
+        else el.removeAttribute('style');
+      }
+
+      // Remove any existing stroke-related attributes
+      el.removeAttribute('stroke-width');
+      el.removeAttribute('stroke-opacity');
+      el.removeAttribute('fill');
+
+      // Force our cut settings via attributes
+      el.setAttribute('stroke', '#ff0000');      // 255,0,0
+      el.setAttribute('stroke-opacity', '1');
+      el.setAttribute('fill', 'none');
+
+      // Visible hairline for editing (browser-friendly)
+      el.setAttribute('stroke-width', String(DISPLAY_CUT_WIDTH));
+      el.setAttribute('vector-effect', 'non-scaling-stroke');
+
+      // Tag as a cut line so we can override on export
+      el.setAttribute('data-cut-line', 'true');
+    });
+
+    // Clean images: grayscale + contrast ONLY (keep bitmap, fewer artefacts)
+    for (const img of svg.querySelectorAll('image')) {
+      let src = img.getAttribute('href') || img.getAttribute('xlink:href');
+      if (src && src.startsWith('data:image')) {
+        src = await new Promise(res => {
+          const i = new Image();
+          i.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = i.width; c.height = i.height;
+            const ctx = c.getContext('2d');
+            ctx.filter = `grayscale(100%) contrast(${contrast})`;
+            ctx.drawImage(i, 0, 0);
+            res(c.toDataURL());
+          };
+          i.src = src;
+        });
+        img.setAttribute('href', src);
+        img.removeAttribute('xlink:href');
+      }
+    }
+
+    // Collect all graphical elements into master
+    svg.querySelectorAll('path,rect,circle,ellipse,polygon,polyline,line,text,image,use,g').forEach(el => {
+      master.appendChild(el.cloneNode(true));
+    });
+  }
+
+  out.innerHTML = '';
+  master.style.maxWidth = "100%";
+  master.style.height   = "auto";
+  out.appendChild(master);
+
+  finalSVG = master;
+  movers   = [];
+  nextMoverId = 0;
+
+  addResizeHandle();
+
+  finalSVG.addEventListener('mousedown', e => {
+    if (e.target === finalSVG) setSelectedMover(null);
+  });
+
+  alert("All SVGs processed & cleaned.\nNow click “Start Smart Packing →” to pack them.");
+
+  packBtn.disabled       = false;
+  dlSvgBtn.style.display = 'inline-block';
+  dlPdfBtn.style.display = 'inline-block';
+
+  // Enable vectorise button only if there are images
+  if (finalSVG.querySelector('image')) {
+    vectoriseBtn.style.display = 'inline-block';
+    vectoriseBtn.disabled = false;
+  } else {
+    vectoriseBtn.style.display = 'none';
+  }
+}
+
+/* ---------- geometry / movers ---------- */
+
+function isShapeOrImage(el) {
+  if (!el || el.nodeType !== 1) return false;
+  if (el.id === 'resizeHandle') return false;
+  const tag = el.tagName.toLowerCase();
+  return [
+    "path", "rect", "circle", "ellipse",
+    "polygon", "polyline", "line",
+    "image", "text"
+  ].includes(tag);
+}
+
+function stripEditorAttrs(svgEl) {
+  svgEl.querySelectorAll("*").forEach(el => {
+    Array.from(el.attributes).forEach(attr => {
+      if (attr.name.startsWith("inkscape:") ||
+          attr.name.startsWith("sodipodi:")) {
+        el.removeAttribute(attr.name);
+      }
+    });
+  });
+}
+
+function propagateTransforms(rootContainer) {
+  function recurse(node, accumulated) {
+    const own = node.getAttribute("transform") || "";
+    const combined = accumulated
+      ? (own ? (accumulated + " " + own) : accumulated)
+      : own;
+
+    Array.from(node.children).forEach(child => recurse(child, combined));
+
+    if (isShapeOrImage(node)) {
+      if (combined && combined.trim() !== "") {
+        node.setAttribute("transform", combined.trim());
+      } else {
+        node.removeAttribute("transform");
+      }
+    }
+  }
+  recurse(rootContainer, "");
+  rootContainer.querySelectorAll("g").forEach(g => g.removeAttribute("transform"));
+}
+
+function explodeGroupsToShapes(rootContainer) {
+  const shapes = Array.from(
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
+  );
+  shapes.forEach(el => {
+    if (el.parentElement !== rootContainer) {
+      rootContainer.appendChild(el);
+    }
+  });
+  Array.from(rootContainer.querySelectorAll("g")).forEach(g => g.remove());
+}
+
+function bboxesOverlap(a, b) {
+  return !(
+    a.x + a.width  < b.x ||
+    b.x + b.width  < a.x ||
+    a.y + a.height < b.y ||
+    b.y + b.height < a.y
+  );
+}
+
+function unionBBox(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const minX = Math.min(a.x, b.x);
+  const minY = Math.min(a.y, b.y);
+  const maxX = Math.max(a.x + a.width,  b.x + b.width);
+  const maxY = Math.max(a.y + a.height, b.y + b.height);
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function setSelectedMover(m) { selectedMover = m; }
+
+function buildMoversFromOverlap(rootContainer) {
+  movers = [];
+  nextMoverId = 0;
+
+  const allShapes = Array.from(
+    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
+  );
+
+  allShapes.forEach(el => {
+    if (!isShapeOrImage(el)) return;
+    const bb = safeBBox(el);
+    if (!bb) return;
+    const baseBBox = { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
+    const mbt = new Map();
+    mbt.set(el, el.getAttribute("transform") || "");
+    movers.push({
+      id: nextMoverId++,
+      members: [el],
+      baseBBox,
+      memberBaseTransforms: mbt,
+      tx: 0,
+      ty: 0
+    });
+  });
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    outer: for (let i = 0; i < movers.length; i++) {
+      for (let j = i + 1; j < movers.length; j++) {
+        const a = movers[i];
+        const b = movers[j];
+        if (bboxesOverlap(a.baseBBox, b.baseBBox)) {
+          a.members = a.members.concat(b.members);
+          b.members.forEach(el => {
+            if (!a.memberBaseTransforms.has(el)) {
+              a.memberBaseTransforms.set(el, b.memberBaseTransforms.get(el) || "");
+            }
+          });
+          a.baseBBox = unionBBox(a.baseBBox, b.baseBBox);
+          movers.splice(j, 1);
+          changed = true;
+          break outer;
+        }
+      }
+    }
+  }
+
+  movers.forEach(m => {
+    m.members.forEach(el => {
+      el.classList.add('mover-member');
+      el.dataset.moverId = String(m.id);
+      el.setAttribute('pointer-events', 'bounding-box');
+      el.onmousedown = moverMouseDown;
+    });
+  });
+}
+
+/* ---------- bottom-left packing ---------- */
+
+function packBottomLeft() {
+  if (!movers.length) return;
+
+  const order = movers.slice().sort((a,b) => {
+    const areaA = a.baseBBox.width * a.baseBBox.height;
+    const areaB = b.baseBBox.width * b.baseBBox.height;
+    return areaB - areaA;
+  });
+
+  const placed = [];
+
+  for (const m of order) {
+    const w = m.baseBBox.width;
+    const h = m.baseBBox.height;
+
+    const xs = [0];
+    placed.forEach(p => {
+      const xCandidate = p.x + p.width;
+      if (xCandidate + w <= sheetW + 1e-6) xs.push(xCandidate);
+    });
+
+    let bestX = 0, bestY = Infinity;
+
+    xs.forEach(x => {
+      let y = 0;
+      placed.forEach(p => {
+        const overlapX = !(x + w <= p.x || p.x + p.width <= x);
+        if (overlapX) {
+          y = Math.max(y, p.y + p.height);
+        }
+      });
+      if (y < bestY || (y === bestY && x < bestX)) {
+        bestY = y;
+        bestX = x;
+      }
+    });
+
+    m.tx = bestX - m.baseBBox.x;
+    m.ty = bestY - m.baseBBox.y;
+
+    placed.push({ x: bestX, y: bestY, width: w, height: h, mover: m });
+  }
+
+  movers.forEach(m => applyMoverTransform(m));
+}
+
+function applyMoverTransform(m) {
+  m.members.forEach(el => {
+    const base = m.memberBaseTransforms.get(el) || "";
+    const translatePart = `translate(${m.tx}, ${m.ty})`;
+    const finalTransform = base
+      ? `${base} ${translatePart}`
+      : translatePart;
+    el.setAttribute("transform", finalTransform.trim());
+  });
+}
+
+/* ---------- fit whole layout into sheet if possible ---------- */
+
+function fitLayoutIntoSheet() {
+  if (!movers.length) return true;
+
+  let minX = Infinity, minY = Infinity;
+  let maxX = -Infinity, maxY = -Infinity;
+
+  movers.forEach(m => {
+    const x = m.baseBBox.x + (m.tx || 0);
+    const y = m.baseBBox.y + (m.ty || 0);
+    const w = m.baseBBox.width;
+    const h = m.baseBBox.height;
+
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x + w > maxX) maxX = x + w;
+    if (y + h > maxY) maxY = y + h;
+  });
+
+  const usedW = maxX - minX;
+  const usedH = maxY - minY;
+
+  const canFit = (usedW <= sheetW && usedH <= sheetH);
+
+  const shiftX = -minX;
+  const shiftY = -minY;
+
+  movers.forEach(m => {
+    m.tx += shiftX;
+    m.ty += shiftY;
+    applyMoverTransform(m);
+  });
+
+  return canFit;
+}
+
+/* ---------- packing orchestration ---------- */
+
+function doPacking(silent = false, fromResize = false) {
+  if (!finalSVG) {
+    if (!silent) alert("No SVG loaded yet.");
+    return;
+  }
+
+  const svgEl = finalSVG;
+  const rootContainer = svgEl;
+
+  propagateTransforms(rootContainer);
+  explodeGroupsToShapes(rootContainer);
+  stripEditorAttrs(svgEl);
+  buildMoversFromOverlap(rootContainer);
+
+  if (!movers.length) {
+    if (!silent) alert("No shapes/images/text found to pack.");
+    return;
+  }
+
+  packBottomLeft();
+  const canFit = fitLayoutIntoSheet();
+
+  if (fromResize && !canFit && !silent) {
+    alert("Sheet is too small for all parts; some will extend beyond the boundary.");
+  }
+
+  if (!silent) {
+    alert("Packing complete.");
+    packBtn.textContent = "Re-pack Now";
+  }
+
+  updateResizeHandle();
+}
+
+function repackExisting(silent = true, fromResize = true) {
+  if (!movers.length) return;
+  packBottomLeft();
+  const canFit = fitLayoutIntoSheet();
+  if (fromResize && !canFit && !silent) {
+    alert("Sheet is too small for all parts; some will extend beyond the boundary.");
+  }
+  updateResizeHandle();
+}
+
+/* ---------- mover dragging + snapping ---------- */
+
+function moverMouseDown(e) {
+  if (!finalSVG) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  const el = e.currentTarget;
+  const id = +el.dataset.moverId;
+  const m = movers.find(mm => mm.id === id);
+  if (!m) return;
+
+  setSelectedMover(m);
+
+  const mouseSVG = clientToSVG(finalSVG, e.clientX, e.clientY);
+
+  const curBox = {
+    x: m.baseBBox.x + (m.tx || 0),
+    y: m.baseBBox.y + (m.ty || 0)
+  };
+
+  dragState = {
+    mover: m,
+    mouseOffset: {
+      x: mouseSVG.x - curBox.x,
+      y: mouseSVG.y - curBox.y
+    }
+  };
+
+  window.addEventListener('mousemove', moverMouseMove);
+  window.addEventListener('mouseup', moverMouseUp);
+}
+
+function moverMouseMove(e) {
+  if (!dragState || !finalSVG) return;
+  e.preventDefault();
+
+  const mouseSVG = clientToSVG(finalSVG, e.clientX, e.clientY);
+  const m = dragState.mover;
+
+  const boxX = mouseSVG.x - dragState.mouseOffset.x;
+  const boxY = mouseSVG.y - dragState.mouseOffset.y;
+
+  m.tx = boxX - m.baseBBox.x;
+  m.ty = boxY - m.baseBBox.y;
+
+  applyMoverTransform(m);
+}
+
+function moverMouseUp(e) {
+  if (!dragState) return;
+  e.preventDefault();
+
+  const m = dragState.mover;
+  snapMoverToNeighbours(m);
+  applyMoverTransform(m);
+
+  dragState = null;
+  window.removeEventListener('mousemove', moverMouseMove);
+  window.removeEventListener('mouseup', moverMouseUp);
+}
+
+function snapMoverToNeighbours(m) {
+  const snapTol = 20; // snap radius
+
+  const mBox = {
+    x: m.baseBBox.x + m.tx,
+    y: m.baseBBox.y + m.ty,
+    width: m.baseBBox.width,
+    height: m.baseBBox.height
+  };
+  const mLeft = mBox.x;
+  const mRight = mBox.x + mBox.width;
+  const mTop = mBox.y;
+  const mBottom = mBox.y + mBox.height;
+
+  let bestDx = 0, bestDxScore = Infinity;
+  let bestDy = 0, bestDyScore = Infinity;
+
+  const scoreX = (d, kind) => {
+    let s = Math.abs(d);
+    if (kind === "shape") s -= 1.0;
+    if (kind === "sheet") s -= 0.3;
+    if (d < 0) s -= 0.2; // favour left
+    return s;
+  };
+
+  const scoreY = (d, kind) => {
+    let s = Math.abs(d);
+    if (kind === "shape") s -= 1.0;
+    if (kind === "sheet") s -= 0.3;
+    if (d < 0) s -= 0.2; // favour up
+    return s;
+  };
+
+  // snaps to other movers
+  movers.forEach(n => {
+    if (n === m) return;
+    const nBox = {
+      x: n.baseBBox.x + (n.tx || 0),
+      y: n.baseBBox.y + (n.ty || 0),
+      width: n.baseBBox.width,
+      height: n.baseBBox.height
+    };
+    const nLeft = nBox.x;
+    const nRight = nBox.x + nBox.width;
+    const nTop = nBox.y;
+    const nBottom = nBox.y + nBox.height;
+
+    // X axis
+    let dX = nLeft - mRight;
+    if (Math.abs(dX) < snapTol) {
+      const s = scoreX(dX, "shape");
+      if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
+    }
+    dX = nRight - mLeft;
+    if (Math.abs(dX) < snapTol) {
+      const s = scoreX(dX, "shape");
+      if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
+    }
+
+    // Y axis
+    let dY = nTop - mBottom;
+    if (Math.abs(dY) < snapTol) {
+      const s = scoreY(dY, "shape");
+      if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
+    }
+    dY = nBottom - mTop;
+    if (Math.abs(dY) < snapTol) {
+      const s = scoreY(dY, "shape");
+      if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
+    }
+  });
+
+  // snaps to sheet boundaries
+  let dX = 0 - mLeft;
+  if (Math.abs(dX) < snapTol) {
+    const s = scoreX(dX, "sheet");
+    if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
+  }
+  dX = sheetW - mRight;
+  if (Math.abs(dX) < snapTol) {
+    const s = scoreX(dX, "sheet");
+    if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
+  }
+
+  let dY = 0 - mTop;
+  if (Math.abs(dY) < snapTol) {
+    const s = scoreY(dY, "sheet");
+    if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
+  }
+  dY = sheetH - mBottom;
+  if (Math.abs(dY) < snapTol) {
+    const s = scoreY(dY, "sheet");
+    if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
+  }
+
+  if (bestDxScore < Infinity || bestDyScore < Infinity) {
+    m.tx += bestDx;
+    m.ty += bestDy;
+  }
+}
+
+/* ---------- resizable sheet (BR handle) ---------- */
+
+function addResizeHandle() {
+  if (!finalSVG) return;
+  let handle = finalSVG.querySelector('#resizeHandle');
+  if (!handle) {
+    handle = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    handle.id = 'resizeHandle';
+    handle.classList.add('resize-handle');
+    handle.setAttribute('width', 8);
+    handle.setAttribute('height', 8);
+    handle.setAttribute('fill', '#c00');
+    handle.setAttribute('stroke', '#c00');
+    handle.setAttribute('stroke-width', '0.5');
+    handle.style.cursor = 'se-resize';
+    finalSVG.appendChild(handle);
+    handle.addEventListener('mousedown', startSheetResize);
+  }
+  updateResizeHandle();
+}
+
+function updateResizeHandle() {
+  if (!finalSVG) return;
+  const handle = finalSVG.querySelector('#resizeHandle');
+  if (!handle) return;
+  const size = 8;
+  handle.setAttribute('x', sheetW - size);
+  handle.setAttribute('y', sheetH - size);
+}
+
+function startSheetResize(e) {
+  if (!finalSVG) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  const pt = clientToSVG(finalSVG, e.clientX, e.clientY);
+  resizeState = {
+    startMouse: pt,
+    startW: sheetW,
+    startH: sheetH
+  };
+
+  window.addEventListener('mousemove', doSheetResize);
+  window.addEventListener('mouseup', stopSheetResize);
+}
+
+function doSheetResize(e) {
+  if (!resizeState || !finalSVG) return;
+  e.preventDefault();
+
+  const pt = clientToSVG(finalSVG, e.clientX, e.clientY);
+  const dx = pt.x - resizeState.startMouse.x;
+  const dy = pt.y - resizeState.startMouse.y;
+
+  const minSize = 50;
+  let newW = resizeState.startW + dx;
+  let newH = resizeState.startH + dy;
+
+  newW = Math.max(minSize, newW);
+  newH = Math.max(minSize, newH);
+
+  newW = Math.round(newW / 5) * 5;
+  newH = Math.round(newH / 5) * 5;
+
+  sheetW = newW;
+  sheetH = newH;
+
+  finalSVG.setAttribute('width', sheetW + "mm");
+  finalSVG.setAttribute('height', sheetH + "mm");
+  finalSVG.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
+
+  document.getElementById('w').value = sheetW;
+  document.getElementById('h').value = sheetH;
+
+  updateResizeHandle();
+}
+
+function stopSheetResize(e) {
+  if (!resizeState) return;
+  e.preventDefault();
+  resizeState = null;
+
+  window.removeEventListener('mousemove', doSheetResize);
+  window.removeEventListener('mouseup', stopSheetResize);
+
+  // re-pack existing movers only
+  repackExisting(true, true);
+}
+
+/* ---------- export helpers ---------- */
+
+function getFileBaseName() {
+  const name = requireStudentName();
+  if (!name) return null;
+  let base = name.trim();
+  base = base.replace(/[^\w\-]+/g, '_'); // safe for filenames
+  return `${base}_${sheetW}x${sheetH}mm`;
+}
+
+// clone + force export stroke widths etc.
+function prepareExportSVG() {
+  if (!finalSVG) return null;
+
+  const exportSVG = finalSVG.cloneNode(true);
+
+  // Remove resize handle from export
+  const handle = exportSVG.querySelector('#resizeHandle');
+  if (handle) handle.remove();
+
+  // Force all cut lines to exact 0.026 mm and clean styles again
+  exportSVG.querySelectorAll('[data-cut-line="true"]').forEach(el => {
+    const rawStyle = el.getAttribute('style') || '';
+    if (rawStyle) {
+      const cleaned = rawStyle
+        .split(';')
+        .map(s => s.trim())
+        .filter(chunk =>
+          chunk &&
+          !chunk.startsWith('stroke-width') &&
+          !chunk.startsWith('stroke:') &&
+          !chunk.startsWith('stroke-opacity') &&
+          !chunk.startsWith('fill:')
+        )
+        .join(';');
+      if (cleaned.trim()) el.setAttribute('style', cleaned);
+      else el.removeAttribute('style');
+    }
+
+    // Nuke any stroke-related attributes, then set ours
+    el.removeAttribute('stroke-width');
+    el.removeAttribute('stroke-opacity');
+    el.removeAttribute('fill');
+
+    el.setAttribute('stroke', '#ff0000');
+    el.setAttribute('stroke-opacity', '1');
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke-width', EXPORT_CUT_WIDTH);
+    el.setAttribute('vector-effect', 'non-scaling-stroke');
+  });
+
+  // Ensure the export SVG has explicit mm size
+  exportSVG.setAttribute('width', sheetW + 'mm');
+  exportSVG.setAttribute('height', sheetH + 'mm');
+  exportSVG.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
+
+  return exportSVG;
+}
+
+/* ---------- SVG download ---------- */
+
+function downloadFinalSVG() {
+  if (!finalSVG) return;
+  const baseName = getFileBaseName();
+  if (!baseName) return;
+
+  const exportSVG = prepareExportSVG();
+  if (!exportSVG) return;
+
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+              new XMLSerializer().serializeToString(exportSVG);
+
+  const blob = new Blob([xml], {type:'image/svg+xml'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = baseName + '.svg';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ---------- PDF download via jsPDF + svg2pdf ---------- */
+
+async function downloadPDF() {
+  if (!finalSVG) return;
+
+  const baseName = getFileBaseName();
+  if (!baseName) return; // enforces student name
+
+  if (!window.jspdf || !window.jspdf.jsPDF || !window.svg2pdf) {
+    alert("PDF libraries not loaded. Check your internet connection or host jsPDF/svg2pdf locally.");
+    return;
+  }
+
+  const exportSVG = prepareExportSVG();
+  if (!exportSVG) return;
+
+  // mm → pt (1 in = 25.4 mm, 1 in = 72 pt → 1 mm ≈ 72/25.4 pt)
+  const mmToPt = mm => mm * 72 / 25.4;
+  const widthMm  = sheetW;
+  const heightMm = sheetH;
+  const widthPt  = mmToPt(widthMm);
+  const heightPt = mmToPt(heightMm);
+
+  const orientation = widthPt > heightPt ? "l" : "p";
+  const { jsPDF } = window.jspdf;
+
+  try {
+    const pdf = new jsPDF({
+      orientation,
+      unit: "pt",
+      format: [widthPt, heightPt],
+    });
+
+    await pdf.svg(exportSVG, {
+      x: 0,
+      y: 0,
+      width: widthPt,
+      height: heightPt
+    });
+
+    pdf.save(baseName + ".pdf");
+  } catch (err) {
+    console.error(err);
+    alert("Error generating PDF. See console for details.");
+  }
+}
+
+/* ---------- Bitmap → Vector tracing with ImageTracer ---------- */
+
+async function vectoriseImages() {
+  if (!finalSVG) return;
+
+  if (typeof ImageTracer === 'undefined' || !ImageTracer.imagedataToSVG) {
+    alert("ImageTracer library not loaded. Check your internet connection or host imagetracer locally.");
+    return;
+  }
+
+  const images = Array.from(finalSVG.querySelectorAll('image'));
+  if (!images.length) {
+    alert('No images to vectorise.');
+    return;
+  }
+
+  for (const imgEl of images) {
+    let href = imgEl.getAttribute('href') || imgEl.getAttribute('xlink:href');
+    if (!href || !href.startsWith('data:image')) continue;
+
+    // 1) Load bitmap
+    const bitmap = await loadImage(href);
+
+    // 2) Draw to canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0);
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // 3) Trace with more grey levels (so it can keep some shading)
+    const options = {
+      numberofcolors: 8,  // try 8–12; more = smoother but heavier
+      ltres: 1,
+      qtres: 1,
+      pathomit: 1,
+      blurradius: 0,
+      blurdelta: 20
+    };
+
+    const svgString = ImageTracer.imagedataToSVG(imageData, options);
+
+    // 4) Parse SVG from tracer
+    const tmpDoc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
+    const tracedSvg = tmpDoc.querySelector('svg');
+    if (!tracedSvg) continue;
+
+    // 5) Position + scale to where the original image was
+    const imgX = parseFloat(imgEl.getAttribute('x') || '0');
+    const imgY = parseFloat(imgEl.getAttribute('y') || '0');
+    const imgW = parseFloat(imgEl.getAttribute('width')  || bitmap.width);
+    const imgH = parseFloat(imgEl.getAttribute('height') || bitmap.height);
+
+    // Source SVG size
+    let srcW = bitmap.width;
+    let srcH = bitmap.height;
+    if (tracedSvg.viewBox && tracedSvg.viewBox.baseVal && tracedSvg.viewBox.baseVal.width > 0) {
+      srcW = tracedSvg.viewBox.baseVal.width;
+      srcH = tracedSvg.viewBox.baseVal.height;
+    } else {
+      const tw = parseFloat(tracedSvg.getAttribute('width')  || srcW);
+      const th = parseFloat(tracedSvg.getAttribute('height') || srcH);
+      if (tw > 0 && th > 0) { srcW = tw; srcH = th; }
+    }
+
+    const sx = imgW / srcW;
+    const sy = imgH / srcH;
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('transform', `translate(${imgX},${imgY}) scale(${sx},${sy})`);
+
+    // 6) Keep ImageTracer's fills (for shading), just remove strokes
+    Array.from(tracedSvg.children).forEach(child => {
+      if (child.tagName && child.tagName.toLowerCase() === 'path') {
+        child.removeAttribute('stroke'); // engrave as filled shapes
+        // DO NOT force fill to black – keep the grey value it generated
+      }
+      g.appendChild(child);
+    });
+
+    // 7) Insert + remove original bitmap
+    finalSVG.appendChild(g);
+    imgEl.remove();
+  }
+
+  // Rebuild movers so traced shapes are draggable
+  buildMoversFromOverlap(finalSVG);
+
+  alert('Images vectorised into shaded paths. They are now pure vectors for engraving.');
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+</script>
+</body>
+</html>
