@@ -60,7 +60,7 @@
   <strong>Smart packing rules (bottom-left layout):</strong>
   <ul>
     <li>Shapes/images/text that touch or overlap are fused into a single rigid mover</li>
-    <li>Movers are treated as rectangles and placed bottom-left, filling gaps better</li>
+    <li>Movers are treated as rectangles and placed bottom-left, filling gaps</li>
     <li>Strong snapping to neighbours and sheet edges (prefers up/left and shapes)</li>
     <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
   </ul>
@@ -72,8 +72,14 @@ let movers = [];
 let finalSVG = null;
 let sheetW = 600;
 let sheetH = 400;
-
 let nextMoverId = 0;
+
+// selection / dragging
+let selectedMover = null;
+let dragState = null;
+
+// sheet resize
+let resizeState = null;
 
 const dropZone = document.getElementById('dropZone');
 const fileInput  = document.getElementById('files');
@@ -105,7 +111,7 @@ packBtn.onclick = () => doPacking(false, false);
 dlBtn.onclick   = downloadFinal;
 resetBtn.onclick = () => location.reload();
 
-/* ---------- shared helpers ---------- */
+/* ---------- helpers ---------- */
 
 function clientToSVG(svg, clientX, clientY) {
   const pt = svg.createSVGPoint();
@@ -118,15 +124,11 @@ function clientToSVG(svg, clientX, clientY) {
   return { x: svgPt.x, y: svgPt.y };
 }
 
-/* ---------- file loading ---------- */
-
 async function loadFiles(files) {
   const svgFiles = [...files].filter(f => f.name.toLowerCase().endsWith('.svg'));
   if (!svgFiles.length) return;
   goBtn.disabled = false;
 }
-
-/* ---------- helper: safe bbox ---------- */
 
 function safeBBox(node) {
   try {
@@ -148,6 +150,7 @@ async function processAll() {
   sheetW = +document.getElementById('w').value || 600;
   sheetH = +document.getElementById('h').value || 400;
   const contrast = +document.getElementById('contrast').value;
+  const DISPLAY_CUT_WIDTH = 0.2; // visible width on screen
 
   const master = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   master.setAttribute("width", sheetW + "mm");
@@ -175,19 +178,56 @@ async function processAll() {
       }
     });
 
-    // Fix red lines (255,0,0, fully opaque, no fill, 0.25mm, non-scaling)
+    // Fix red lines for display (visible) + tag for export
     svg.querySelectorAll('*').forEach(el => {
-      const stroke = (el.getAttribute('stroke') || '').toLowerCase();
-      if (/ff0000|red|#f00|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\)/.test(stroke)) {
-        el.setAttribute('stroke', '#ff0000');
-        el.setAttribute('stroke-opacity', '1');
-        el.setAttribute('fill', 'none');
-        el.setAttribute('stroke-width', '0.25');
-        el.setAttribute('vector-effect', 'non-scaling-stroke');
+      const rawStrokeAttr = el.getAttribute('stroke') || '';
+      const rawStyle      = el.getAttribute('style') || '';
+
+      const strokeAttr = rawStrokeAttr.toLowerCase();
+
+      // Look for stroke colour in style as well
+      let strokeFromStyle = '';
+      const strokeStyleMatch = rawStyle.toLowerCase().match(/stroke\s*:\s*([^;]+)/);
+      if (strokeStyleMatch) {
+        strokeFromStyle = strokeStyleMatch[1].trim();
       }
+
+      const strokeValue = strokeAttr || strokeFromStyle;
+
+      const isRed = /(#ff0000|#f00|\bred\b|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\))/.test(strokeValue);
+      if (!isRed) return;
+
+      // 1) Clean style: remove stroke-related stuff completely
+      if (rawStyle) {
+        const cleaned = rawStyle
+          .split(';')
+          .map(s => s.trim())
+          .filter(chunk =>
+            chunk &&
+            !chunk.startsWith('stroke-width') &&
+            !chunk.startsWith('stroke:') &&
+            !chunk.startsWith('stroke-opacity') &&
+            !chunk.startsWith('fill:')
+          )
+          .join(';');
+        if (cleaned.trim()) el.setAttribute('style', cleaned);
+        else el.removeAttribute('style');
+      }
+
+      // 2) Now force our cut settings via attributes
+      el.setAttribute('stroke', '#ff0000');      // 255,0,0
+      el.setAttribute('stroke-opacity', '1');
+      el.setAttribute('fill', 'none');
+
+      // Visible hairline for editing (browser-friendly)
+      el.setAttribute('stroke-width', String(DISPLAY_CUT_WIDTH));
+      el.setAttribute('vector-effect', 'non-scaling-stroke');
+
+      // 3) Tag as a cut line so we can override on export
+      el.setAttribute('data-cut-line', 'true');
     });
 
-    // Clean images
+    // Clean images (grayscale + contrast + drop near-white to transparent)
     for (const img of svg.querySelectorAll('image')) {
       let src = img.getAttribute('href') || img.getAttribute('xlink:href');
       if (src && src.startsWith('data:image')) {
@@ -243,7 +283,7 @@ async function processAll() {
   dlBtn.style.display = 'inline-block';
 }
 
-/* ---------- geometry helpers for packing ---------- */
+/* ---------- geometry / movers ---------- */
 
 function isShapeOrImage(el) {
   if (!el || el.nodeType !== 1) return false;
@@ -285,7 +325,6 @@ function propagateTransforms(rootContainer) {
     }
   }
   recurse(rootContainer, "");
-
   rootContainer.querySelectorAll("g").forEach(g => g.removeAttribute("transform"));
 }
 
@@ -320,13 +359,8 @@ function unionBBox(a, b) {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-/* selection + dragging state */
-let selectedMover = null;
-let dragState = null;
-
 function setSelectedMover(m) { selectedMover = m; }
 
-/* Build movers from overlapping/touching shapes, images, and text. */
 function buildMoversFromOverlap(rootContainer) {
   movers = [];
   nextMoverId = 0;
@@ -385,12 +419,11 @@ function buildMoversFromOverlap(rootContainer) {
   });
 }
 
-/* ---------- Bottom-left packing (fills gaps better than rows) ---------- */
+/* ---------- bottom-left packing ---------- */
 
 function packBottomLeft() {
   if (!movers.length) return;
 
-  // Sort by area (big first)
   const order = movers.slice().sort((a,b) => {
     const areaA = a.baseBBox.width * a.baseBBox.height;
     const areaB = b.baseBBox.width * b.baseBBox.height;
@@ -403,7 +436,6 @@ function packBottomLeft() {
     const w = m.baseBBox.width;
     const h = m.baseBBox.height;
 
-    // Candidate X positions: 0 and all right edges of placed boxes
     const xs = [0];
     placed.forEach(p => {
       const xCandidate = p.x + p.width;
@@ -414,14 +446,12 @@ function packBottomLeft() {
 
     xs.forEach(x => {
       let y = 0;
-      // minimal y such that we don't overlap any placed box horizontally overlapping
       placed.forEach(p => {
         const overlapX = !(x + w <= p.x || p.x + p.width <= x);
         if (overlapX) {
           y = Math.max(y, p.y + p.height);
         }
       });
-      // choose candidate with lowest y, then leftmost x
       if (y < bestY || (y === bestY && x < bestX)) {
         bestY = y;
         bestX = x;
@@ -496,7 +526,6 @@ function doPacking(silent = false, fromResize = false) {
   const svgEl = finalSVG;
   const rootContainer = svgEl;
 
-  // Full rebuild from DOM (for initial pack / button repack)
   propagateTransforms(rootContainer);
   explodeGroupsToShapes(rootContainer);
   stripEditorAttrs(svgEl);
@@ -522,7 +551,6 @@ function doPacking(silent = false, fromResize = false) {
   updateResizeHandle();
 }
 
-/* Re-pack only using existing movers (for resize; no DOM rebuild) */
 function repackExisting(silent = true, fromResize = true) {
   if (!movers.length) return;
   packBottomLeft();
@@ -533,7 +561,7 @@ function repackExisting(silent = true, fromResize = true) {
   updateResizeHandle();
 }
 
-/* ---------- mover dragging + snapping ---------- */
+/* ---------- mover dragging + snapping (separate X/Y) ---------- */
 
 function moverMouseDown(e) {
   if (!finalSVG) return;
@@ -609,17 +637,14 @@ function snapMoverToNeighbours(m) {
   const mTop = mBox.y;
   const mBottom = mBox.y + mBox.height;
 
-  // best candidates per axis
   let bestDx = 0, bestDxScore = Infinity;
   let bestDy = 0, bestDyScore = Infinity;
 
-  // helper scorers
   const scoreX = (d, kind) => {
     let s = Math.abs(d);
-    // prefer shapes over sheet, then leftwards movement
     if (kind === "shape") s -= 1.0;
     if (kind === "sheet") s -= 0.3;
-    if (d < 0) s -= 0.2;    // favour left
+    if (d < 0) s -= 0.2; // favour left
     return s;
   };
 
@@ -627,11 +652,11 @@ function snapMoverToNeighbours(m) {
     let s = Math.abs(d);
     if (kind === "shape") s -= 1.0;
     if (kind === "sheet") s -= 0.3;
-    if (d < 0) s -= 0.2;    // favour up
+    if (d < 0) s -= 0.2; // favour up
     return s;
   };
 
-  // ---- snaps to other movers (preferred) ----
+  // snaps to other movers
   movers.forEach(n => {
     if (n === m) return;
     const nBox = {
@@ -645,7 +670,7 @@ function snapMoverToNeighbours(m) {
     const nTop = nBox.y;
     const nBottom = nBox.y + nBox.height;
 
-    // X axis: right->left, left->right
+    // X axis
     let dX = nLeft - mRight;
     if (Math.abs(dX) < snapTol) {
       const s = scoreX(dX, "shape");
@@ -657,7 +682,7 @@ function snapMoverToNeighbours(m) {
       if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
     }
 
-    // Y axis: bottom->top, top->bottom
+    // Y axis
     let dY = nTop - mBottom;
     if (Math.abs(dY) < snapTol) {
       const s = scoreY(dY, "shape");
@@ -670,41 +695,36 @@ function snapMoverToNeighbours(m) {
     }
   });
 
-  // ---- snaps to sheet boundaries (secondary) ----
-  // X axis
-  let dX = 0 - mLeft;          // left edge
+  // snaps to sheet boundaries
+  let dX = 0 - mLeft;
   if (Math.abs(dX) < snapTol) {
     const s = scoreX(dX, "sheet");
     if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
   }
-  dX = sheetW - mRight;        // right edge
+  dX = sheetW - mRight;
   if (Math.abs(dX) < snapTol) {
     const s = scoreX(dX, "sheet");
     if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
   }
 
-  // Y axis
-  let dY = 0 - mTop;           // top edge
+  let dY = 0 - mTop;
   if (Math.abs(dY) < snapTol) {
     const s = scoreY(dY, "sheet");
     if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
   }
-  dY = sheetH - mBottom;       // bottom edge
+  dY = sheetH - mBottom;
   if (Math.abs(dY) < snapTol) {
     const s = scoreY(dY, "sheet");
     if (s < bestDyScore) { bestDyScore = s; bestDy = dY; }
   }
 
-  // ---- apply both axes together ----
   if (bestDxScore < Infinity || bestDyScore < Infinity) {
     m.tx += bestDx;
     m.ty += bestDy;
   }
 }
 
-/* ---------- resizable sheet (bottom-right drag handle) ---------- */
-
-let resizeState = null;
+/* ---------- resizable sheet (BR handle) ---------- */
 
 function addResizeHandle() {
   if (!finalSVG) return;
@@ -789,20 +809,53 @@ function stopSheetResize(e) {
   window.removeEventListener('mousemove', doSheetResize);
   window.removeEventListener('mouseup', stopSheetResize);
 
-  // Re-pack using existing movers only
+  // re-pack existing movers only
   repackExisting(true, true);
 }
 
-/* ---------- download ---------- */
+/* ---------- download (clone + force 0.026mm) ---------- */
 
 function downloadFinal() {
   if (!finalSVG) return;
 
-  const handle = finalSVG.querySelector('#resizeHandle');
+  const CUT_WIDTH = '0.026'; // real hairline for the laser
+
+  // Work on a clone so on-screen view stays pretty
+  const exportSVG = finalSVG.cloneNode(true);
+
+  // Remove resize handle from export
+  const handle = exportSVG.querySelector('#resizeHandle');
   if (handle) handle.remove();
 
+  // Force all cut lines to exact 0.026 mm and clean styles again
+  exportSVG.querySelectorAll('[data-cut-line="true"]').forEach(el => {
+    const rawStyle = el.getAttribute('style') || '';
+    if (rawStyle) {
+      const cleaned = rawStyle
+        .split(';')
+        .map(s => s.trim())
+        .filter(chunk =>
+          chunk &&
+          !chunk.startsWith('stroke-width') &&
+          !chunk.startsWith('stroke:') &&
+          !chunk.startsWith('stroke-opacity') &&
+          !chunk.startsWith('fill:')
+        )
+        .join(';');
+      if (cleaned.trim()) el.setAttribute('style', cleaned);
+      else el.removeAttribute('style');
+    }
+
+    el.setAttribute('stroke', '#ff0000');
+    el.setAttribute('stroke-opacity', '1');
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke-width', CUT_WIDTH);
+    el.setAttribute('vector-effect', 'non-scaling-stroke');
+  });
+
   const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
-              new XMLSerializer().serializeToString(finalSVG);
+              new XMLSerializer().serializeToString(exportSVG);
+
   const blob = new Blob([xml], {type:'image/svg+xml'});
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
@@ -810,8 +863,6 @@ function downloadFinal() {
   a.download = 'laser-perfect-packed.svg';
   a.click();
   URL.revokeObjectURL(url);
-
-  addResizeHandle();
 }
 </script>
 </body>
