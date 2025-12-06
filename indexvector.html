@@ -196,6 +196,18 @@ function safeBBox(node) {
   return null;
 }
 
+function rebuildMoversPreservingPositions() {
+  if (!finalSVG) return;
+  const svgEl = finalSVG;
+
+  // Push any remaining group transforms down onto shapes, then flatten groups
+  propagateTransforms(svgEl);
+  explodeGroupsToShapes(svgEl);
+  stripEditorAttrs(svgEl);
+  buildMoversFromOverlap(svgEl);
+}
+
+
 /* ---------- process & clean all SVGs into a master SVG ---------- */
 
 async function processAll() {
@@ -1001,8 +1013,6 @@ async function downloadPDF() {
   }
 }
 
-/* ---------- Bitmap → Vector tracing with ImageTracer ---------- */
-
 async function vectoriseImages() {
   if (!finalSVG) return;
 
@@ -1021,10 +1031,28 @@ async function vectoriseImages() {
     let href = imgEl.getAttribute('href') || imgEl.getAttribute('xlink:href');
     if (!href || !href.startsWith('data:image')) continue;
 
-    // 1) Load bitmap
+    // --- 1) Find the mover this image currently belongs to (if any) ---
+    let parentMover = null;
+    if (movers && movers.length) {
+      // if dataset.moverId exists, prefer it
+      const idAttr = imgEl.dataset && imgEl.dataset.moverId;
+      if (idAttr != null) {
+        const idNum = +idAttr;
+        parentMover = movers.find(m => m.id === idNum) || null;
+      }
+      // fallback: brute force search
+      if (!parentMover) {
+        parentMover = movers.find(m => m.members.includes(imgEl)) || null;
+      }
+    }
+
+    // --- 2) Current position of the image in sheet coords (after packing) ---
+    const bb = safeBBox(imgEl);
+    if (!bb) continue; // can't place if we don't know where it is
+
+    // --- 3) Load bitmap and trace it ---
     const bitmap = await loadImage(href);
 
-    // 2) Draw to canvas
     const canvas = document.createElement('canvas');
     canvas.width = bitmap.width;
     canvas.height = bitmap.height;
@@ -1033,66 +1061,146 @@ async function vectoriseImages() {
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-    // 3) Trace with more grey levels (so it can keep some shading)
+    // A few colours -> smoother edge; we'll collapse to black later
     const options = {
-      numberofcolors: 8,  // try 8–12; more = smoother but heavier
+      numberofcolors: 6,
       ltres: 1,
       qtres: 1,
       pathomit: 1,
-      blurradius: 0,
+      blurradius: 1,
       blurdelta: 20
     };
 
     const svgString = ImageTracer.imagedataToSVG(imageData, options);
 
-    // 4) Parse SVG from tracer
-    const tmpDoc = new DOMParser().parseFromString(svgString, 'image/svg+xml');
+    const tmpDoc    = new DOMParser().parseFromString(svgString, 'image/svg+xml');
     const tracedSvg = tmpDoc.querySelector('svg');
     if (!tracedSvg) continue;
 
-    // 5) Position + scale to where the original image was
-    const imgX = parseFloat(imgEl.getAttribute('x') || '0');
-    const imgY = parseFloat(imgEl.getAttribute('y') || '0');
-    const imgW = parseFloat(imgEl.getAttribute('width')  || bitmap.width);
-    const imgH = parseFloat(imgEl.getAttribute('height') || bitmap.height);
+    // --- 4) Source SVG size + viewBox offset (for scaling correctly) ---
+    let vb   = tracedSvg.viewBox && tracedSvg.viewBox.baseVal ? tracedSvg.viewBox.baseVal : null;
+    let srcX = 0, srcY = 0, srcW = bitmap.width, srcH = bitmap.height;
 
-    // Source SVG size
-    let srcW = bitmap.width;
-    let srcH = bitmap.height;
-    if (tracedSvg.viewBox && tracedSvg.viewBox.baseVal && tracedSvg.viewBox.baseVal.width > 0) {
-      srcW = tracedSvg.viewBox.baseVal.width;
-      srcH = tracedSvg.viewBox.baseVal.height;
+    if (vb && vb.width > 0 && vb.height > 0) {
+      srcX = vb.x;
+      srcY = vb.y;
+      srcW = vb.width;
+      srcH = vb.height;
     } else {
       const tw = parseFloat(tracedSvg.getAttribute('width')  || srcW);
       const th = parseFloat(tracedSvg.getAttribute('height') || srcH);
       if (tw > 0 && th > 0) { srcW = tw; srcH = th; }
+      // origin assumed 0,0
     }
 
-    const sx = imgW / srcW;
-    const sy = imgH / srcH;
+    // We want the traced art to exactly fill the image's *current* bounding box
+    const sx = bb.width  / srcW;
+    const sy = bb.height / srcH;
 
-    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    g.setAttribute('transform', `translate(${imgX},${imgY}) scale(${sx},${sy})`);
+    // Placement transform based on CURRENT bbox (after packing)
+    const placementTransform =
+      `translate(${bb.x},${bb.y}) scale(${sx},${sy}) translate(${-srcX},${-srcY})`;
 
-    // 6) Keep ImageTracer's fills (for shading), just remove strokes
-    Array.from(tracedSvg.children).forEach(child => {
-      if (child.tagName && child.tagName.toLowerCase() === 'path') {
-        child.removeAttribute('stroke'); // engrave as filled shapes
-        // DO NOT force fill to black – keep the grey value it generated
+    // --- 5) Helper: fill -> brightness, so we can drop light junk and keep dark bits ---
+    function fillBrightness(fill) {
+      if (!fill) return 1;
+      fill = fill.trim().toLowerCase();
+
+      if (fill === 'black') return 0;
+      if (fill === 'white') return 1;
+
+      let r, g, b;
+
+      const hexMatch = fill.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+      if (hexMatch) {
+        let hex = hexMatch[1];
+        if (hex.length === 3) {
+          hex = hex.split('').map(c => c + c).join('');
+        }
+        const intVal = parseInt(hex, 16);
+        r = (intVal >> 16) & 255;
+        g = (intVal >> 8)  & 255;
+        b =  intVal        & 255;
+      } else {
+        const rgbMatch = fill.match(/rgb\s*\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)/);
+        if (rgbMatch) {
+          r = parseFloat(rgbMatch[1]);
+          g = parseFloat(rgbMatch[2]);
+          b = parseFloat(rgbMatch[3]);
+        } else {
+          // unknown / none -> assume light
+          return 1;
+        }
       }
-      g.appendChild(child);
+      const brightness = (r + g + b) / (3 * 255);
+      return brightness;
+    }
+
+    const BRIGHTNESS_THRESHOLD = 0.7; // lower = more detail, higher = bolder
+
+    // --- 6) Move traced children into the main SVG, in the right place ---
+    const newMembers = []; // children we’ll add to the parent mover (if there is one)
+
+    Array.from(tracedSvg.children).forEach(child => {
+      const tag = child.tagName ? child.tagName.toLowerCase() : '';
+      if (!tag) return;
+
+      const fill = (child.getAttribute('fill') || '').trim().toLowerCase();
+      const bright = fillBrightness(fill);
+
+      // Drop very light / white shapes – removes background + halo/junk
+      if (bright > BRIGHTNESS_THRESHOLD) {
+        return;
+      }
+
+      // Combine placement transform with any existing child transform
+      const childTransform = child.getAttribute('transform') || '';
+      const combined = (placementTransform + ' ' + childTransform).trim();
+      if (combined) {
+        child.setAttribute('transform', combined);
+      } else {
+        child.removeAttribute('transform');
+      }
+
+      // Force everything that survives to pure black, no stroke
+      child.setAttribute('fill', '#000000');
+      child.removeAttribute('stroke');
+
+      finalSVG.appendChild(child);
+      newMembers.push(child);
     });
 
-    // 7) Insert + remove original bitmap
-    finalSVG.appendChild(g);
+    // --- 7) Update mover data so Bart stays in the same mover ---
+    if (parentMover && newMembers.length) {
+      // remove the old image from that mover
+      const idx = parentMover.members.indexOf(imgEl);
+      if (idx !== -1) parentMover.members.splice(idx, 1);
+      parentMover.memberBaseTransforms.delete(imgEl);
+
+      // add new traced shapes as members of that same mover
+      newMembers.forEach(ch => {
+        parentMover.members.push(ch);
+        parentMover.memberBaseTransforms.set(ch, ch.getAttribute('transform') || "");
+
+        const bbChild = safeBBox(ch);
+        if (bbChild) {
+          parentMover.baseBBox = unionBBox(parentMover.baseBBox, {
+            x: bbChild.x,
+            y: bbChild.y,
+            width: bbChild.width,
+            height: bbChild.height
+          });
+        }
+      });
+    }
+
+    // --- 8) Finally, remove the original bitmap from the SVG ---
     imgEl.remove();
   }
 
-  // Rebuild movers so traced shapes are draggable
-  buildMoversFromOverlap(finalSVG);
-
-  alert('Images vectorised into shaded paths. They are now pure vectors for engraving.');
+  alert('Images vectorised to a single black engraving, staying attached to their original movers.');
 }
+
 
 function loadImage(src) {
   return new Promise((resolve, reject) => {
