@@ -16,11 +16,12 @@
     background:#fff; padding:30px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.08);
   }
   button {
-    padding:16px 36px; margin:12px; font-size:18px; border:none; border-radius:12px; cursor:pointer; font-weight:bold;
+    padding:16px 36px; margin:8px; font-size:16px; border:none; border-radius:12px; cursor:pointer; font-weight:bold;
   }
   #go {background:#c00; color:white;}
   #pack {background:#0066cc; color:white;}
-  #dl {background:#00a000; color:white; display:none;}
+  #dlSvg {background:#00a000; color:white; display:none;}
+  #dlPdf {background:#008858; color:white; display:none;}
   #reset {background:#666; color:white;}
   .slider {margin:20px 0; font-size:1.1em;}
   #out svg {max-width:100%; height:auto; background:white; border:3px solid #c00; border-radius:12px; box-shadow:0 10px 40px rgba(0,0,0,0.15);}
@@ -42,6 +43,8 @@
   Sheet size 
   <input type="number" id="w" value="600" style="width:90px"> ×
   <input type="number" id="h" value="400" style="width:90px"> mm
+  &nbsp;&nbsp;Student name
+  <input type="text" id="studentName" placeholder="Student name" style="width:180px">
 
   <div class="slider">
     Engraving contrast <span id="cVal">1.80</span>×
@@ -50,7 +53,8 @@
 
   <button id="go" disabled>Process & Clean All SVGs</button>
   <button id="pack" disabled>Start Smart Packing →</button>
-  <button id="dl">Download Final SVG</button>
+  <button id="dlSvg">Download Final SVG</button>
+  <button id="dlPdf">Download PDF</button>
   <button id="reset">Reset</button>
 </div>
 
@@ -63,9 +67,15 @@
     <li>Movers are treated as rectangles and placed bottom-left, filling gaps</li>
     <li>Strong snapping to neighbours and sheet edges (prefers up/left and shapes)</li>
     <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
+    <li>SVG export uses true 0.026&nbsp;mm stroke width for red cut lines</li>
+    <li>PDF export is real vector, not a screenshot</li>
   </ul>
-  100% offline • Works with multiple files • Battle-tested
+  100% offline for SVG processing • PDF uses jsPDF + svg2pdf (can be self-hosted)
 </div>
+
+<!-- PDF libraries -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://unpkg.com/svg2pdf.js@2.2.3/dist/svg2pdf.umd.js"></script>
 
 <script>
 let movers = [];
@@ -81,15 +91,20 @@ let dragState = null;
 // sheet resize
 let resizeState = null;
 
-const dropZone = document.getElementById('dropZone');
-const fileInput  = document.getElementById('files');
-const goBtn      = document.getElementById('go');
-const packBtn    = document.getElementById('pack');
-const dlBtn      = document.getElementById('dl');
-const resetBtn   = document.getElementById('reset');
+const dropZone       = document.getElementById('dropZone');
+const fileInput      = document.getElementById('files');
+const goBtn          = document.getElementById('go');
+const packBtn        = document.getElementById('pack');
+const dlSvgBtn       = document.getElementById('dlSvg');
+const dlPdfBtn       = document.getElementById('dlPdf');
+const resetBtn       = document.getElementById('reset');
 const contrastSlider = document.getElementById('contrast');
 const contrastLabel  = document.getElementById('cVal');
-const out = document.getElementById('out');
+const out            = document.getElementById('out');
+const nameInput      = document.getElementById('studentName');
+
+const DISPLAY_CUT_WIDTH = 0.2;     // visible on screen
+const EXPORT_CUT_WIDTH  = '0.026'; // real hairline mm for laser
 
 dropZone.onclick = () => fileInput.click();
 fileInput.onchange = e => loadFiles(e.target.files);
@@ -106,12 +121,23 @@ dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
 
 contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
 
-goBtn.onclick   = processAll;
-packBtn.onclick = () => doPacking(false, false);
-dlBtn.onclick   = downloadFinal;
+goBtn.onclick    = processAll;
+packBtn.onclick  = () => doPacking(false, false);
+dlSvgBtn.onclick = downloadFinalSVG;
+dlPdfBtn.onclick = downloadPDF;
 resetBtn.onclick = () => location.reload();
 
 /* ---------- helpers ---------- */
+
+function requireStudentName() {
+  const name = nameInput.value.trim();
+  if (!name) {
+    alert("Please enter the student's name before downloading.");
+    nameInput.focus();
+    return null;
+  }
+  return name;
+}
 
 function clientToSVG(svg, clientX, clientY) {
   const pt = svg.createSVGPoint();
@@ -150,12 +176,13 @@ async function processAll() {
   sheetW = +document.getElementById('w').value || 600;
   sheetH = +document.getElementById('h').value || 400;
   const contrast = +document.getElementById('contrast').value;
-  const DISPLAY_CUT_WIDTH = 0.2; // visible width on screen
 
   const master = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   master.setAttribute("width", sheetW + "mm");
   master.setAttribute("height", sheetH + "mm");
   master.setAttribute("viewBox", `0 0 ${sheetW} ${sheetH}`);
+  master.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  master.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
 
   for (const file of fileInput.files) {
     if (!file.name.toLowerCase().endsWith('.svg')) continue;
@@ -178,7 +205,7 @@ async function processAll() {
       }
     });
 
-    // Fix red lines for display (visible) + tag for export
+    // Fix red lines for display + tag for export
     svg.querySelectorAll('*').forEach(el => {
       const rawStrokeAttr = el.getAttribute('stroke') || '';
       const rawStyle      = el.getAttribute('style') || '';
@@ -187,7 +214,8 @@ async function processAll() {
 
       // Look for stroke colour in style as well
       let strokeFromStyle = '';
-      const strokeStyleMatch = rawStyle.toLowerCase().match(/stroke\s*:\s*([^;]+)/);
+      const styleLower = rawStyle.toLowerCase();
+      const strokeStyleMatch = styleLower.match(/stroke\s*:\s*([^;]+)/);
       if (strokeStyleMatch) {
         strokeFromStyle = strokeStyleMatch[1].trim();
       }
@@ -197,7 +225,7 @@ async function processAll() {
       const isRed = /(#ff0000|#f00|\bred\b|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\))/.test(strokeValue);
       if (!isRed) return;
 
-      // 1) Clean style: remove stroke-related stuff completely
+      // Clean style: remove stroke-related stuff completely
       if (rawStyle) {
         const cleaned = rawStyle
           .split(';')
@@ -214,7 +242,7 @@ async function processAll() {
         else el.removeAttribute('style');
       }
 
-      // 2) Now force our cut settings via attributes
+      // Force our cut settings via attributes
       el.setAttribute('stroke', '#ff0000');      // 255,0,0
       el.setAttribute('stroke-opacity', '1');
       el.setAttribute('fill', 'none');
@@ -223,7 +251,7 @@ async function processAll() {
       el.setAttribute('stroke-width', String(DISPLAY_CUT_WIDTH));
       el.setAttribute('vector-effect', 'non-scaling-stroke');
 
-      // 3) Tag as a cut line so we can override on export
+      // Tag as a cut line so we can override on export
       el.setAttribute('data-cut-line', 'true');
     });
 
@@ -279,8 +307,9 @@ async function processAll() {
 
   alert("All SVGs processed & cleaned.\nNow click “Start Smart Packing →” to pack them.");
 
-  packBtn.disabled = false;
-  dlBtn.style.display = 'inline-block';
+  packBtn.disabled  = false;
+  dlSvgBtn.style.display = 'inline-block';
+  dlPdfBtn.style.display  = 'inline-block';
 }
 
 /* ---------- geometry / movers ---------- */
@@ -624,7 +653,7 @@ function moverMouseUp(e) {
 }
 
 function snapMoverToNeighbours(m) {
-  const snapTol = 20; // bigger snap radius
+  const snapTol = 20; // snap radius
 
   const mBox = {
     x: m.baseBBox.x + m.tx,
@@ -813,14 +842,20 @@ function stopSheetResize(e) {
   repackExisting(true, true);
 }
 
-/* ---------- download (clone + force 0.026mm) ---------- */
+/* ---------- export helpers ---------- */
 
-function downloadFinal() {
-  if (!finalSVG) return;
+function getFileBaseName() {
+  const name = requireStudentName();
+  if (!name) return null;
+  let base = name.trim();
+  base = base.replace(/[^\w\-]+/g, '_'); // safe for filenames
+  return `${base}_${sheetW}x${sheetH}mm`;
+}
 
-  const CUT_WIDTH = '0.026'; // real hairline for the laser
+// clone + force export stroke widths etc.
+function prepareExportSVG() {
+  if (!finalSVG) return null;
 
-  // Work on a clone so on-screen view stays pretty
   const exportSVG = finalSVG.cloneNode(true);
 
   // Remove resize handle from export
@@ -849,9 +884,22 @@ function downloadFinal() {
     el.setAttribute('stroke', '#ff0000');
     el.setAttribute('stroke-opacity', '1');
     el.setAttribute('fill', 'none');
-    el.setAttribute('stroke-width', CUT_WIDTH);
+    el.setAttribute('stroke-width', EXPORT_CUT_WIDTH);
     el.setAttribute('vector-effect', 'non-scaling-stroke');
   });
+
+  return exportSVG;
+}
+
+/* ---------- SVG download ---------- */
+
+function downloadFinalSVG() {
+  if (!finalSVG) return;
+  const baseName = getFileBaseName();
+  if (!baseName) return;
+
+  const exportSVG = prepareExportSVG();
+  if (!exportSVG) return;
 
   const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
               new XMLSerializer().serializeToString(exportSVG);
@@ -860,9 +908,52 @@ function downloadFinal() {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href = url;
-  a.download = 'laser-perfect-packed.svg';
+  a.download = baseName + '.svg';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/* ---------- PDF download (vector) ---------- */
+
+function downloadPDF() {
+  if (!finalSVG) return;
+  const baseName = getFileBaseName();
+  if (!baseName) return;
+
+  if (
+    !window.jspdf ||
+    typeof window.jspdf.jsPDF !== 'function' ||
+    typeof window.svg2pdf !== 'function'
+  ) {
+    alert("PDF libraries not loaded. Check your internet connection or host jsPDF/svg2pdf locally.");
+    return;
+  }
+
+  const exportSVG = prepareExportSVG();
+  if (!exportSVG) return;
+
+  const { jsPDF } = window.jspdf;
+
+  // PDF size in points (1 mm = 72 / 25.4 pt)
+  const mmToPt = 72 / 25.4;
+  const pdfW = sheetW * mmToPt;
+  const pdfH = sheetH * mmToPt;
+
+  const doc = new jsPDF({
+    unit: 'pt',
+    format: [pdfW, pdfH],
+    orientation: pdfW >= pdfH ? 'landscape' : 'portrait'
+  });
+
+  // svg2pdf: render SVG into the PDF
+  svg2pdf(exportSVG, doc, {
+    x: 0,
+    y: 0,
+    width: pdfW,
+    height: pdfH
+  });
+
+  doc.save(baseName + '.pdf');
 }
 </script>
 </body>
