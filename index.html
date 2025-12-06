@@ -2,9 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Laser SVG Prep — Smart Packing Done Right</title>
+<title>Laser SVG Prep — Smart Packing Edition</title>
 <style>
-  body {font-family:Arial,sans-serif; max-width:1100px; margin:40px auto; background:#fafafa; color:#222;}
+  body {
+    font-family:Arial,sans-serif;
+    max-width:1100px;
+    margin:40px auto;
+    background:#fafafa;
+    color:#222;
+  }
   h1 {text-align:center; color:#c00; margin-bottom:8px;}
   h1 + p {text-align:center; font-size:1.2em; color:#555; margin-top:0;}
   .drop {
@@ -24,8 +30,24 @@
   #dlPdf {background:#008858; color:white; display:none;}
   #reset {background:#666; color:white;}
   .slider {margin:20px 0; font-size:1.1em;}
-  #out svg {max-width:100%; height:auto; background:white; border:3px solid #c00; border-radius:12px; box-shadow:0 10px 40px rgba(0,0,0,0.15);}
-  .info {margin-top:40px; background:#f0f0f0; padding:20px; border-radius:12px; font-size:0.95em;}
+
+  /* on-screen SVG preview */
+  #out svg {
+    max-width:100%;
+    height:auto;
+    background:white;
+    border:3px solid #c00;
+    border-radius:12px;
+    box-shadow:0 10px 40px rgba(0,0,0,0.15);
+  }
+
+  .info {
+    margin-top:40px;
+    background:#f0f0f0;
+    padding:20px;
+    border-radius:12px;
+    font-size:0.95em;
+  }
 
   .mover-member { cursor: move; }
   .resize-handle { cursor: se-resize; }
@@ -67,16 +89,13 @@
     <li>Movers are treated as rectangles and placed bottom-left, filling gaps</li>
     <li>Strong snapping to neighbours and sheet edges (prefers up/left and shapes)</li>
     <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
-    <li>SVG export uses true 0.026&nbsp;mm stroke width for red cut lines</li>
-    <li>PDF export is real vector, not a screenshot</li>
+    <li>Exports: red cuts forced to <strong>0.026&nbsp;mm</strong> stroke width in SVG & PDF</li>
   </ul>
-  100% offline for SVG processing • PDF uses jsPDF + svg2pdf (can be self-hosted)
 </div>
 
-<!-- PDF libraries - local copies in same folder as this HTML file -->
-<script src="jspdf.umd.min.js"></script>
-<script src="svg2pdf.umd.js"></script>
-
+<!-- jsPDF + svg2pdf from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.0/dist/svg2pdf.umd.min.js"></script>
 
 <script>
 let movers = [];
@@ -104,8 +123,8 @@ const contrastLabel  = document.getElementById('cVal');
 const out            = document.getElementById('out');
 const nameInput      = document.getElementById('studentName');
 
-const DISPLAY_CUT_WIDTH = 0.2;     // visible on screen
-const EXPORT_CUT_WIDTH  = '0.026'; // real hairline mm for laser
+const DISPLAY_CUT_WIDTH = 0.2;         // visible on screen (mm, via viewBox)
+const EXPORT_CUT_WIDTH  = '0.026mm';   // true laser hairline for export
 
 dropZone.onclick = () => fileInput.click();
 fileInput.onchange = e => loadFiles(e.target.files);
@@ -122,8 +141,8 @@ dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
 
 contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
 
-goBtn.onclick    = processAll;
-packBtn.onclick  = () => doPacking(false, false);
+goBtn.onclick   = processAll;
+packBtn.onclick = () => doPacking(false, false);
 dlSvgBtn.onclick = downloadFinalSVG;
 dlPdfBtn.onclick = downloadPDF;
 resetBtn.onclick = () => location.reload();
@@ -133,7 +152,7 @@ resetBtn.onclick = () => location.reload();
 function requireStudentName() {
   const name = nameInput.value.trim();
   if (!name) {
-    alert("Please enter the student's name before downloading.");
+    alert("Please enter the student's name before exporting.");
     nameInput.focus();
     return null;
   }
@@ -243,6 +262,11 @@ async function processAll() {
         else el.removeAttribute('style');
       }
 
+      // Remove any existing stroke-related attributes
+      el.removeAttribute('stroke-width');
+      el.removeAttribute('stroke-opacity');
+      el.removeAttribute('fill');
+
       // Force our cut settings via attributes
       el.setAttribute('stroke', '#ff0000');      // 255,0,0
       el.setAttribute('stroke-opacity', '1');
@@ -256,7 +280,7 @@ async function processAll() {
       el.setAttribute('data-cut-line', 'true');
     });
 
-    // Clean images (grayscale + contrast + drop near-white to transparent)
+    // Clean images: grayscale + contrast ONLY (no pixel hacking → fewer artefacts)
     for (const img of svg.querySelectorAll('image')) {
       let src = img.getAttribute('href') || img.getAttribute('xlink:href');
       if (src && src.startsWith('data:image')) {
@@ -268,14 +292,6 @@ async function processAll() {
             const ctx = c.getContext('2d');
             ctx.filter = `grayscale(100%) contrast(${contrast})`;
             ctx.drawImage(i, 0, 0);
-
-            const imgData = ctx.getImageData(0,0,c.width,c.height);
-            const d = imgData.data;
-            for (let j=0; j<d.length; j+=4) {
-              const gray = (d[j] + d[j+1] + d[j+2]) / 3;
-              if (gray > 235) d[j+3] = 0;
-            }
-            ctx.putImageData(imgData,0,0);
             res(c.toDataURL());
           };
           i.src = src;
@@ -308,9 +324,9 @@ async function processAll() {
 
   alert("All SVGs processed & cleaned.\nNow click “Start Smart Packing →” to pack them.");
 
-  packBtn.disabled  = false;
+  packBtn.disabled   = false;
   dlSvgBtn.style.display = 'inline-block';
-  dlPdfBtn.style.display  = 'inline-block';
+  dlPdfBtn.style.display = 'inline-block';
 }
 
 /* ---------- geometry / movers ---------- */
@@ -591,7 +607,7 @@ function repackExisting(silent = true, fromResize = true) {
   updateResizeHandle();
 }
 
-/* ---------- mover dragging + snapping (separate X/Y) ---------- */
+/* ---------- mover dragging + snapping ---------- */
 
 function moverMouseDown(e) {
   if (!finalSVG) return;
@@ -882,12 +898,22 @@ function prepareExportSVG() {
       else el.removeAttribute('style');
     }
 
+    // Nuke any stroke-related attributes, then set ours
+    el.removeAttribute('stroke-width');
+    el.removeAttribute('stroke-opacity');
+    el.removeAttribute('fill');
+
     el.setAttribute('stroke', '#ff0000');
     el.setAttribute('stroke-opacity', '1');
     el.setAttribute('fill', 'none');
     el.setAttribute('stroke-width', EXPORT_CUT_WIDTH);
     el.setAttribute('vector-effect', 'non-scaling-stroke');
   });
+
+  // Ensure the export SVG has explicit mm size
+  exportSVG.setAttribute('width', sheetW + 'mm');
+  exportSVG.setAttribute('height', sheetH + 'mm');
+  exportSVG.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
 
   return exportSVG;
 }
@@ -914,47 +940,53 @@ function downloadFinalSVG() {
   URL.revokeObjectURL(url);
 }
 
-/* ---------- PDF download (vector) ---------- */
+/* ---------- PDF download via jsPDF + svg2pdf ---------- */
 
-function downloadPDF() {
+async function downloadPDF() {
   if (!finalSVG) return;
+
   const baseName = getFileBaseName();
-  if (!baseName) return;
+  if (!baseName) return; // enforces student name
 
-  const hasJsPDF  = window.jspdf && typeof window.jspdf.jsPDF === 'function';
-  const hasSvg2Pdf = typeof window.svg2pdf === 'function';
-
-  if (!hasJsPDF || !hasSvg2Pdf) {
-    alert("PDF libraries not loaded. Make sure jspdf.umd.min.js and svg2pdf.umd.js are in the same folder as this HTML file.");
+  if (!window.jspdf || !window.jspdf.jsPDF || !window.svg2pdf) {
+    alert("PDF libraries not loaded. Check your internet connection or host jsPDF/svg2pdf locally.");
     return;
   }
 
   const exportSVG = prepareExportSVG();
   if (!exportSVG) return;
 
+  // mm → pt (1 in = 25.4 mm, 1 in = 72 pt → 1 mm ≈ 72/25.4 pt)
+  const mmToPt = mm => mm * 72 / 25.4;
+  const widthMm  = sheetW;
+  const heightMm = sheetH;
+  const widthPt  = mmToPt(widthMm);
+  const heightPt = mmToPt(heightMm);
+
+  const orientation = widthPt > heightPt ? "l" : "p";
   const { jsPDF } = window.jspdf;
 
-  const mmToPt = 72 / 25.4;
-  const pdfW = sheetW * mmToPt;
-  const pdfH = sheetH * mmToPt;
+  try {
+    const pdf = new jsPDF({
+      orientation,
+      unit: "pt",
+      format: [widthPt, heightPt],
+    });
 
-  const doc = new jsPDF({
-    unit: 'pt',
-    format: [pdfW, pdfH],
-    orientation: pdfW >= pdfH ? 'landscape' : 'portrait'
-  });
+    // svg2pdf will honour stroke widths and our mm geometry
+    await pdf.svg(exportSVG, {
+      x: 0,
+      y: 0,
+      width: widthPt,
+      height: heightPt
+    });
 
-  // svg2pdf: render SVG into the PDF
-  svg2pdf(exportSVG, doc, {
-    x: 0,
-    y: 0,
-    width: pdfW,
-    height: pdfH
-  });
-
-  doc.save(baseName + '.pdf');
+    pdf.save(baseName + ".pdf");
+  } catch (err) {
+    console.error(err);
+    alert("Error generating PDF. See console for details.");
+  }
 }
-
 </script>
 </body>
 </html>
