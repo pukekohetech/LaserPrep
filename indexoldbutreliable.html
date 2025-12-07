@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Laser SVG Prep — Smart Packing Edition</title>
+<title>Laser SVG Prep — Smart Packing + PDF</title>
 <style>
   body {
     font-family:Arial,sans-serif;
@@ -13,25 +13,44 @@
   }
   h1 {text-align:center; color:#c00; margin-bottom:8px;}
   h1 + p {text-align:center; font-size:1.2em; color:#555; margin-top:0;}
+
   .drop {
-    border:4px dashed #999; padding:90px; text-align:center; background:#fff;
-    border-radius:16px; margin:30px 0; cursor:pointer; font-size:1.5em; transition:.3s;
+    border:4px dashed #999;
+    padding:90px;
+    text-align:center;
+    background:#fff;
+    border-radius:16px;
+    margin:30px 0;
+    cursor:pointer;
+    font-size:1.5em;
+    transition:.3s;
   }
   .drop.dragover {border-color:#c00; background:#ffe5e5;}
+
   .controls {
-    background:#fff; padding:30px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.08);
+    background:#fff;
+    padding:30px;
+    text-align:center;
+    box-shadow:0 4px 20px rgba(0,0,0,0.08);
   }
+
   button {
-    padding:16px 36px; margin:8px; font-size:16px; border:none; border-radius:12px; cursor:pointer; font-weight:bold;
+    padding:16px 36px;
+    margin:12px;
+    font-size:18px;
+    border:none;
+    border-radius:12px;
+    cursor:pointer;
+    font-weight:bold;
   }
-  #go {background:#c00; color:white;}
-  #pack {background:#0066cc; color:white;}
+  #go    {background:#c00;    color:white;}
+  #pack  {background:#0066cc; color:white;}
   #dlSvg {background:#00a000; color:white; display:none;}
   #dlPdf {background:#008858; color:white; display:none;}
-  #reset {background:#666; color:white;}
+  #reset {background:#666;    color:white;}
+
   .slider {margin:20px 0; font-size:1.1em;}
 
-  /* on-screen SVG preview */
   #out svg {
     max-width:100%;
     height:auto;
@@ -56,7 +75,7 @@
 <body>
 
 <h1>Laser SVG Prep — Smart Packing Edition</h1>
-<p>Drop any number of Inkscape SVGs → perfect red lines, clean engraving images, and real connected-shape packing</p>
+<p>Drop Inkscape SVGs → clean red lines, engraving images, smart packing, and SVG/PDF export.</p>
 
 <div class="drop" id="dropZone">Drop SVG files here or click</div>
 <input type="file" id="files" accept=".svg" multiple style="display:none">
@@ -73,8 +92,9 @@
     <input type="range" id="contrast" min="0.5" max="5" step="0.1" value="1.8">
   </div>
 
-  <button id="go" disabled>Process & Clean All SVGs</button>
-  <button id="pack" disabled>Start Smart Packing →</button>
+  <!-- go/pack remain as "manual override" buttons, but processing happens automatically on file load -->
+  <button id="go" disabled>Re-process All SVGs</button>
+  <button id="pack" disabled>Re-pack Now</button>
   <button id="dlSvg">Download Final SVG</button>
   <button id="dlPdf">Download PDF</button>
   <button id="reset">Reset</button>
@@ -83,14 +103,15 @@
 <div id="out"></div>
 
 <div class="info">
-  <strong>Smart packing rules (bottom-left layout):</strong>
+  <strong>Smart packing workflow:</strong>
   <ul>
-    <li>Shapes/images/text that touch or overlap are fused into a single rigid mover</li>
-    <li>Movers are treated as rectangles and placed bottom-left, filling gaps</li>
-    <li>Strong snapping to neighbours and sheet edges (prefers up/left and shapes)</li>
-    <li>Pure red cut lines, engraving-cleaned images, Inkscape junk reduced</li>
-    <li>Exports: red cuts forced to <strong>0.026&nbsp;mm</strong> stroke width in SVG & PDF</li>
+    <li>Drop SVGs → they are automatically cleaned and packed</li>
+    <li>Drag parts to tweak, or resize the sheet with the red corner handle</li>
+    <li>When you finish resizing, parts re-pack to the new sheet size</li>
+    <li>On export, you’re asked if you want to shrink the sheet to remove blank space</li>
+    <li>Then you’re prompted for the student name (used in the file name)</li>
   </ul>
+  100% offline • Multiple files • Exports SVG + PDF
 </div>
 
 <!-- jsPDF + svg2pdf from CDN -->
@@ -98,18 +119,23 @@
 <script src="https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.0/dist/svg2pdf.umd.min.js"></script>
 
 <script>
-let movers = [];
+/* ---------- global state ---------- */
+
+let movers   = [];
 let finalSVG = null;
-let sheetW = 600;
-let sheetH = 400;
+let sheetW   = 600;
+let sheetH   = 400;
 let nextMoverId = 0;
 
-// selection / dragging
-let selectedMover = null;
-let dragState = null;
-
+// dragging movers
+let dragState   = null;
 // sheet resize
 let resizeState = null;
+
+const DISPLAY_CUT_WIDTH = 0.2;      // screen hairline
+const EXPORT_CUT_WIDTH  = '0.026';  // real laser hairline (mm-ish)
+
+/* ---------- DOM refs ---------- */
 
 const dropZone       = document.getElementById('dropZone');
 const fileInput      = document.getElementById('files');
@@ -123,8 +149,7 @@ const contrastLabel  = document.getElementById('cVal');
 const out            = document.getElementById('out');
 const nameInput      = document.getElementById('studentName');
 
-const DISPLAY_CUT_WIDTH = 0.2;         // visible on screen (mm, via viewBox)
-const EXPORT_CUT_WIDTH  = '0.026mm';   // true laser hairline for export
+/* ---------- basic UI wiring ---------- */
 
 dropZone.onclick = () => fileInput.click();
 fileInput.onchange = e => loadFiles(e.target.files);
@@ -141,8 +166,9 @@ dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
 
 contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
 
-goBtn.onclick   = processAll;
-packBtn.onclick = () => doPacking(false, false);
+// Manual override buttons
+goBtn.onclick    = () => processAll(false);        // show alerts
+packBtn.onclick  = () => doPacking(false, false);  // show alert
 dlSvgBtn.onclick = downloadFinalSVG;
 dlPdfBtn.onclick = downloadPDF;
 resetBtn.onclick = () => location.reload();
@@ -159,6 +185,14 @@ function requireStudentName() {
   return name;
 }
 
+function getFileBaseName() {
+  const name = requireStudentName();
+  if (!name) return null;
+  let base = name.trim();
+  base = base.replace(/[^\w\-]+/g, '_'); // safe-ish filename
+  return `${base}_${sheetW}x${sheetH}mm`;
+}
+
 function clientToSVG(svg, clientX, clientY) {
   const pt = svg.createSVGPoint();
   pt.x = clientX;
@@ -173,9 +207,14 @@ function clientToSVG(svg, clientX, clientY) {
 async function loadFiles(files) {
   const svgFiles = [...files].filter(f => f.name.toLowerCase().endsWith('.svg'));
   if (!svgFiles.length) return;
+
   goBtn.disabled = false;
+
+  // Auto process + pack when files are chosen
+  await processAll(true);   // silent mode
 }
 
+/* Safe getBBox wrapper */
 function safeBBox(node) {
   try {
     if (typeof node.getBBox === 'function') {
@@ -190,9 +229,15 @@ function safeBBox(node) {
   return null;
 }
 
-/* ---------- process & clean all SVGs into a master SVG ---------- */
+/* ---------- processing: clean SVGs into a single master ---------- */
+/* silent = true → no alerts (for auto-run) */
 
-async function processAll() {
+async function processAll(silent = false) {
+  if (!fileInput.files || !fileInput.files.length) {
+    if (!silent) alert("No SVG files selected.");
+    return;
+  }
+
   sheetW = +document.getElementById('w').value || 600;
   sheetH = +document.getElementById('h').value || 400;
   const contrast = +document.getElementById('contrast').value;
@@ -201,8 +246,6 @@ async function processAll() {
   master.setAttribute("width", sheetW + "mm");
   master.setAttribute("height", sheetH + "mm");
   master.setAttribute("viewBox", `0 0 ${sheetW} ${sheetH}`);
-  master.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-  master.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
 
   for (const file of fileInput.files) {
     if (!file.name.toLowerCase().endsWith('.svg')) continue;
@@ -211,7 +254,7 @@ async function processAll() {
     const svg  = doc.querySelector('svg');
     if (!svg) continue;
 
-    // Simple translate baker (only handles translate())
+    // Bake simple translate() into coordinates
     svg.querySelectorAll('*').forEach(el => {
       const t = el.getAttribute('transform') || '';
       if (t.includes('translate')) {
@@ -225,27 +268,21 @@ async function processAll() {
       }
     });
 
-    // Fix red lines for display + tag for export
+    // Normalise red cut lines & tag them
     svg.querySelectorAll('*').forEach(el => {
       const rawStrokeAttr = el.getAttribute('stroke') || '';
       const rawStyle      = el.getAttribute('style') || '';
 
       const strokeAttr = rawStrokeAttr.toLowerCase();
-
-      // Look for stroke colour in style as well
       let strokeFromStyle = '';
-      const styleLower = rawStyle.toLowerCase();
-      const strokeStyleMatch = styleLower.match(/stroke\s*:\s*([^;]+)/);
-      if (strokeStyleMatch) {
-        strokeFromStyle = strokeStyleMatch[1].trim();
-      }
+      const styleMatch = rawStyle.toLowerCase().match(/stroke\s*:\s*([^;]+)/);
+      if (styleMatch) strokeFromStyle = styleMatch[1].trim();
 
       const strokeValue = strokeAttr || strokeFromStyle;
-
       const isRed = /(#ff0000|#f00|\bred\b|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\))/.test(strokeValue);
       if (!isRed) return;
 
-      // Clean style: remove stroke-related stuff completely
+      // Strip stroke/fill from inline style
       if (rawStyle) {
         const cleaned = rawStyle
           .split(';')
@@ -262,25 +299,15 @@ async function processAll() {
         else el.removeAttribute('style');
       }
 
-      // Remove any existing stroke-related attributes
-      el.removeAttribute('stroke-width');
-      el.removeAttribute('stroke-opacity');
-      el.removeAttribute('fill');
-
-      // Force our cut settings via attributes
-      el.setAttribute('stroke', '#ff0000');      // 255,0,0
+      el.setAttribute('stroke', '#ff0000');
       el.setAttribute('stroke-opacity', '1');
       el.setAttribute('fill', 'none');
-
-      // Visible hairline for editing (browser-friendly)
       el.setAttribute('stroke-width', String(DISPLAY_CUT_WIDTH));
       el.setAttribute('vector-effect', 'non-scaling-stroke');
-
-      // Tag as a cut line so we can override on export
       el.setAttribute('data-cut-line', 'true');
     });
 
-    // Clean images: grayscale + contrast ONLY (no pixel hacking → fewer artefacts)
+    // Clean images: grayscale + contrast + drop near-white to transparent
     for (const img of svg.querySelectorAll('image')) {
       let src = img.getAttribute('href') || img.getAttribute('xlink:href');
       if (src && src.startsWith('data:image')) {
@@ -292,6 +319,14 @@ async function processAll() {
             const ctx = c.getContext('2d');
             ctx.filter = `grayscale(100%) contrast(${contrast})`;
             ctx.drawImage(i, 0, 0);
+
+            const imgData = ctx.getImageData(0,0,c.width,c.height);
+            const d = imgData.data;
+            for (let j=0; j<d.length; j+=4) {
+              const gray = (d[j] + d[j+1] + d[j+2]) / 3;
+              if (gray > 235) d[j+3] = 0; // transparent nearly-white
+            }
+            ctx.putImageData(imgData,0,0);
             res(c.toDataURL());
           };
           i.src = src;
@@ -301,35 +336,38 @@ async function processAll() {
       }
     }
 
-    // Collect all graphical elements into master
+    // Move all graphics into master
     svg.querySelectorAll('path,rect,circle,ellipse,polygon,polyline,line,text,image,use,g').forEach(el => {
       master.appendChild(el.cloneNode(true));
     });
   }
 
+  // Swap in master SVG
   out.innerHTML = '';
   master.style.maxWidth = "100%";
   master.style.height   = "auto";
   out.appendChild(master);
 
-  finalSVG = master;
-  movers   = [];
+  finalSVG    = master;
+  movers      = [];
   nextMoverId = 0;
 
   addResizeHandle();
 
-  finalSVG.addEventListener('mousedown', e => {
-    if (e.target === finalSVG) setSelectedMover(null);
-  });
+  await doPacking(silent, false);
 
-  alert("All SVGs processed & cleaned.\nNow click “Start Smart Packing →” to pack them.");
+  packBtn.disabled = false;
+  packBtn.textContent = "Re-pack Now";
 
-  packBtn.disabled   = false;
   dlSvgBtn.style.display = 'inline-block';
   dlPdfBtn.style.display = 'inline-block';
+
+  if (!silent) {
+    alert("All SVGs processed and packed.\nYou can drag parts, resize the sheet, then export as SVG or PDF.");
+  }
 }
 
-/* ---------- geometry / movers ---------- */
+/* ---------- geometry + movers ---------- */
 
 function isShapeOrImage(el) {
   if (!el || el.nodeType !== 1) return false;
@@ -405,8 +443,6 @@ function unionBBox(a, b) {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-function setSelectedMover(m) { selectedMover = m; }
-
 function buildMoversFromOverlap(rootContainer) {
   movers = [];
   nextMoverId = 0;
@@ -415,6 +451,7 @@ function buildMoversFromOverlap(rootContainer) {
     rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
   );
 
+  // Start with one mover per element
   allShapes.forEach(el => {
     if (!isShapeOrImage(el)) return;
     const bb = safeBBox(el);
@@ -432,6 +469,7 @@ function buildMoversFromOverlap(rootContainer) {
     });
   });
 
+  // Merge overlapping movers
   let changed = true;
   while (changed) {
     changed = false;
@@ -455,6 +493,7 @@ function buildMoversFromOverlap(rootContainer) {
     }
   }
 
+  // Make members draggable
   movers.forEach(m => {
     m.members.forEach(el => {
       el.classList.add('mover-member');
@@ -524,7 +563,7 @@ function applyMoverTransform(m) {
   });
 }
 
-/* ---------- fit whole layout into sheet if possible ---------- */
+/* ---------- fit layout into sheet ---------- */
 
 function fitLayoutIntoSheet() {
   if (!movers.length) return true;
@@ -561,21 +600,35 @@ function fitLayoutIntoSheet() {
   return canFit;
 }
 
+/* ---------- re-pack existing movers (used on resize) ---------- */
+
+function repackExisting(silent = true, fromResize = true) {
+  if (!movers.length) return;
+
+  packBottomLeft();
+  const canFit = fitLayoutIntoSheet();
+
+  if (fromResize && !canFit && !silent) {
+    alert("Sheet is too small for all parts; some will extend beyond the boundary.");
+  }
+
+  updateResizeHandle();
+}
+
 /* ---------- packing orchestration ---------- */
 
-function doPacking(silent = false, fromResize = false) {
+async function doPacking(silent = false, fromResize = false) {
   if (!finalSVG) {
     if (!silent) alert("No SVG loaded yet.");
     return;
   }
 
-  const svgEl = finalSVG;
-  const rootContainer = svgEl;
+  const root = finalSVG;
 
-  propagateTransforms(rootContainer);
-  explodeGroupsToShapes(rootContainer);
-  stripEditorAttrs(svgEl);
-  buildMoversFromOverlap(rootContainer);
+  propagateTransforms(root);
+  explodeGroupsToShapes(root);
+  stripEditorAttrs(finalSVG);
+  buildMoversFromOverlap(root);
 
   if (!movers.length) {
     if (!silent) alert("No shapes/images/text found to pack.");
@@ -591,19 +644,8 @@ function doPacking(silent = false, fromResize = false) {
 
   if (!silent) {
     alert("Packing complete.");
-    packBtn.textContent = "Re-pack Now";
   }
 
-  updateResizeHandle();
-}
-
-function repackExisting(silent = true, fromResize = true) {
-  if (!movers.length) return;
-  packBottomLeft();
-  const canFit = fitLayoutIntoSheet();
-  if (fromResize && !canFit && !silent) {
-    alert("Sheet is too small for all parts; some will extend beyond the boundary.");
-  }
   updateResizeHandle();
 }
 
@@ -618,8 +660,6 @@ function moverMouseDown(e) {
   const id = +el.dataset.moverId;
   const m = movers.find(mm => mm.id === id);
   if (!m) return;
-
-  setSelectedMover(m);
 
   const mouseSVG = clientToSVG(finalSVG, e.clientX, e.clientY);
 
@@ -670,7 +710,7 @@ function moverMouseUp(e) {
 }
 
 function snapMoverToNeighbours(m) {
-  const snapTol = 20; // snap radius
+  const snapTol = 20;
 
   const mBox = {
     x: m.baseBBox.x + m.tx,
@@ -678,9 +718,9 @@ function snapMoverToNeighbours(m) {
     width: m.baseBBox.width,
     height: m.baseBBox.height
   };
-  const mLeft = mBox.x;
-  const mRight = mBox.x + mBox.width;
-  const mTop = mBox.y;
+  const mLeft   = mBox.x;
+  const mRight  = mBox.x + mBox.width;
+  const mTop    = mBox.y;
   const mBottom = mBox.y + mBox.height;
 
   let bestDx = 0, bestDxScore = Infinity;
@@ -690,7 +730,7 @@ function snapMoverToNeighbours(m) {
     let s = Math.abs(d);
     if (kind === "shape") s -= 1.0;
     if (kind === "sheet") s -= 0.3;
-    if (d < 0) s -= 0.2; // favour left
+    if (d < 0) s -= 0.2; // prefer left
     return s;
   };
 
@@ -698,11 +738,11 @@ function snapMoverToNeighbours(m) {
     let s = Math.abs(d);
     if (kind === "shape") s -= 1.0;
     if (kind === "sheet") s -= 0.3;
-    if (d < 0) s -= 0.2; // favour up
+    if (d < 0) s -= 0.2; // prefer up
     return s;
   };
 
-  // snaps to other movers
+  // Snap to other movers
   movers.forEach(n => {
     if (n === m) return;
     const nBox = {
@@ -711,9 +751,9 @@ function snapMoverToNeighbours(m) {
       width: n.baseBBox.width,
       height: n.baseBBox.height
     };
-    const nLeft = nBox.x;
-    const nRight = nBox.x + nBox.width;
-    const nTop = nBox.y;
+    const nLeft   = nBox.x;
+    const nRight  = nBox.x + nBox.width;
+    const nTop    = nBox.y;
     const nBottom = nBox.y + nBox.height;
 
     // X axis
@@ -741,7 +781,7 @@ function snapMoverToNeighbours(m) {
     }
   });
 
-  // snaps to sheet boundaries
+  // Snap to sheet boundaries
   let dX = 0 - mLeft;
   if (Math.abs(dX) < snapTol) {
     const s = scoreX(dX, "sheet");
@@ -770,7 +810,7 @@ function snapMoverToNeighbours(m) {
   }
 }
 
-/* ---------- resizable sheet (BR handle) ---------- */
+/* ---------- resizable sheet (corner handle) ---------- */
 
 function addResizeHandle() {
   if (!finalSVG) return;
@@ -855,31 +895,100 @@ function stopSheetResize(e) {
   window.removeEventListener('mousemove', doSheetResize);
   window.removeEventListener('mouseup', stopSheetResize);
 
-  // re-pack existing movers only
-  repackExisting(true, true);
+  // Re-pack into the new sheet size when resizing is finished
+  repackExisting(true, true); // silent = true
 }
+
+/* ---------- auto-tighten sheet before export ---------- */
+
+function computeContentBounds() {
+  if (!finalSVG) return null;
+
+  const els = finalSVG.querySelectorAll(
+    "path, rect, circle, ellipse, polygon, polyline, line, image, text"
+  );
+
+  let minX = Infinity, minY = Infinity;
+  let maxX = -Infinity, maxY = -Infinity;
+  let found = false;
+
+  els.forEach(el => {
+    if (!isShapeOrImage(el)) return;
+    const bb = safeBBox(el);
+    if (!bb) return;
+    found = true;
+    minX = Math.min(minX, bb.x);
+    minY = Math.min(minY, bb.y);
+    maxX = Math.max(maxX, bb.x + bb.width);
+    maxY = Math.max(maxY, bb.y + bb.height);
+  });
+
+  if (!found) return null;
+
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    usedW: maxX - minX,
+    usedH: maxY - minY
+  };
+}
+
+function autoTightenSheet(bounds) {
+  if (!finalSVG) return;
+  const b = bounds || computeContentBounds();
+  if (!b) return;
+
+  // Shift everything so content starts at (0,0)
+  const shiftX = -b.minX;
+  const shiftY = -b.minY;
+
+  const els = finalSVG.querySelectorAll(
+    "path, rect, circle, ellipse, polygon, polyline, line, image, text"
+  );
+
+  els.forEach(el => {
+    if (!isShapeOrImage(el)) return;
+    const base = el.getAttribute('transform') || '';
+    const extra = `translate(${shiftX}, ${shiftY})`;
+    el.setAttribute('transform', (base ? base + ' ' + extra : extra).trim());
+  });
+
+  // Shrink sheet to tight bounds (rounded to 5mm, min 50mm)
+  const usedW = b.usedW;
+  const usedH = b.usedH;
+  let newW = Math.max(50, Math.round(usedW / 5) * 5);
+  let newH = Math.max(50, Math.round(usedH / 5) * 5);
+
+  sheetW = newW;
+  sheetH = newH;
+
+  finalSVG.setAttribute('width', sheetW + "mm");
+  finalSVG.setAttribute('height', sheetH + "mm");
+  finalSVG.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
+
+  document.getElementById('w').value = sheetW;
+  document.getElementById('h').value = sheetH;
+
+  updateResizeHandle();
+}
+
+/* Always ask about tightening sheet, every download, before name prompt */
+
 
 /* ---------- export helpers ---------- */
 
-function getFileBaseName() {
-  const name = requireStudentName();
-  if (!name) return null;
-  let base = name.trim();
-  base = base.replace(/[^\w\-]+/g, '_'); // safe for filenames
-  return `${base}_${sheetW}x${sheetH}mm`;
-}
-
-// clone + force export stroke widths etc.
 function prepareExportSVG() {
   if (!finalSVG) return null;
 
   const exportSVG = finalSVG.cloneNode(true);
 
-  // Remove resize handle from export
+  // Remove resize handle
   const handle = exportSVG.querySelector('#resizeHandle');
   if (handle) handle.remove();
 
-  // Force all cut lines to exact 0.026 mm and clean styles again
+  // Force all cut lines to hairline, clean styles
   exportSVG.querySelectorAll('[data-cut-line="true"]').forEach(el => {
     const rawStyle = el.getAttribute('style') || '';
     if (rawStyle) {
@@ -898,11 +1007,6 @@ function prepareExportSVG() {
       else el.removeAttribute('style');
     }
 
-    // Nuke any stroke-related attributes, then set ours
-    el.removeAttribute('stroke-width');
-    el.removeAttribute('stroke-opacity');
-    el.removeAttribute('fill');
-
     el.setAttribute('stroke', '#ff0000');
     el.setAttribute('stroke-opacity', '1');
     el.setAttribute('fill', 'none');
@@ -910,7 +1014,6 @@ function prepareExportSVG() {
     el.setAttribute('vector-effect', 'non-scaling-stroke');
   });
 
-  // Ensure the export SVG has explicit mm size
   exportSVG.setAttribute('width', sheetW + 'mm');
   exportSVG.setAttribute('height', sheetH + 'mm');
   exportSVG.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
@@ -922,6 +1025,11 @@ function prepareExportSVG() {
 
 function downloadFinalSVG() {
   if (!finalSVG) return;
+
+  // 1) Always ask about tightening sheet
+  //maybePromptToTightenSheet();
+
+  // 2) Then require student name (last warning)
   const baseName = getFileBaseName();
   if (!baseName) return;
 
@@ -940,13 +1048,17 @@ function downloadFinalSVG() {
   URL.revokeObjectURL(url);
 }
 
-/* ---------- PDF download via jsPDF + svg2pdf ---------- */
+/* ---------- PDF download (jsPDF + svg2pdf) ---------- */
 
 async function downloadPDF() {
   if (!finalSVG) return;
 
+  // 1) Always ask about tightening sheet
+ //
+
+  // 2) Then require student name (last warning)
   const baseName = getFileBaseName();
-  if (!baseName) return; // enforces student name
+  if (!baseName) return;
 
   if (!window.jspdf || !window.jspdf.jsPDF || !window.svg2pdf) {
     alert("PDF libraries not loaded. Check your internet connection or host jsPDF/svg2pdf locally.");
@@ -956,7 +1068,6 @@ async function downloadPDF() {
   const exportSVG = prepareExportSVG();
   if (!exportSVG) return;
 
-  // mm → pt (1 in = 25.4 mm, 1 in = 72 pt → 1 mm ≈ 72/25.4 pt)
   const mmToPt = mm => mm * 72 / 25.4;
   const widthMm  = sheetW;
   const heightMm = sheetH;
@@ -973,7 +1084,6 @@ async function downloadPDF() {
       format: [widthPt, heightPt],
     });
 
-    // svg2pdf will honour stroke widths and our mm geometry
     await pdf.svg(exportSVG, {
       x: 0,
       y: 0,
