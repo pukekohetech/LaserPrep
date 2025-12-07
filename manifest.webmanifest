@@ -1,0 +1,23 @@
+{
+  "id": "/LaserPrep/",
+  "name": "Laser SVG Prep",
+  "short_name": "LaserPrep",
+  "description": "Offline laser cutter SVG prep tool with smart packing and PDF export.",
+  "start_url": "/LaserPrep/",
+  "scope": "/LaserPrep/",
+  "display": "standalone",
+  "background_color": "#fafafa",
+  "theme_color": "#cc0000",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
