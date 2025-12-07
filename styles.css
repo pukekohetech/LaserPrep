@@ -1,0 +1,85 @@
+body {
+  font-family: Arial, sans-serif;
+  max-width: 1100px;
+  margin: 40px auto;
+  background: #fafafa;
+  color: #222;
+}
+
+h1 {
+  text-align: center;
+  color: #c00;
+  margin-bottom: 8px;
+}
+
+h1 + p {
+  text-align: center;
+  font-size: 1.2em;
+  color: #555;
+  margin-top: 0;
+}
+
+.drop {
+  border: 4px dashed #999;
+  padding: 90px;
+  text-align: center;
+  background: #fff;
+  border-radius: 16px;
+  margin: 30px 0;
+  cursor: pointer;
+  font-size: 1.5em;
+  transition: .3s;
+}
+
+.drop.dragover {
+  border-color: #c00;
+  background: #ffe5e5;
+}
+
+.controls {
+  background: #fff;
+  padding: 30px;
+  text-align: center;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+}
+
+button {
+  padding: 16px 36px;
+  margin: 12px;
+  font-size: 18px;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: bold;
+}
+
+#go    { background: #c00;    color: white; }
+#pack  { background: #0066cc; color: white; }
+#dlSvg { background: #00a000; color: white; display: none; }
+#dlPdf { background: #008858; color: white; display: none; }
+#reset { background: #666;    color: white; }
+
+.slider {
+  margin: 20px 0;
+  font-size: 1.1em;
+}
+
+#out svg {
+  max-width: 100%;
+  height: auto;
+  background: white;
+  border: 3px solid #c00;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+}
+
+.info {
+  margin-top: 40px;
+  background: #f0f0f0;
+  padding: 20px;
+  border-radius: 12px;
+  font-size: 0.95em;
+}
+
+.mover-member { cursor: move; }
+.resize-handle { cursor: se-resize; }
