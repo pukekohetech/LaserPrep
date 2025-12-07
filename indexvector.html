@@ -26,13 +26,12 @@
   }
   #go {background:#c00; color:white;}
   #pack {background:#0066cc; color:white;}
-  #vectoriseImages {background:#cc9900; color:white; display:none;}
   #dlSvg {background:#00a000; color:white; display:none;}
   #dlPdf {background:#008858; color:white; display:none;}
   #reset {background:#666; color:white;}
+  #debugMovers {background:#999; color:white; font-size:14px; padding:10px 18px;}
   .slider {margin:20px 0; font-size:1.1em;}
 
-  /* on-screen SVG preview */
   #out svg {
     max-width:100%;
     height:auto;
@@ -55,9 +54,8 @@
 </style>
 </head>
 <body>
-
 <h1>Laser SVG Prep — Smart Packing Edition</h1>
-<p>Drop any number of Inkscape SVGs → perfect red lines, clean engraving images, smart packing, and bitmap-to-vector engravings.</p>
+<p>Drop any number of Inkscape SVGs → red 0.026&nbsp;mm cut lines, vectorised engravings, smart packing, and PDF export.</p>
 
 <div class="drop" id="dropZone">Drop SVG files here or click</div>
 <input type="file" id="files" accept=".svg" multiple style="display:none">
@@ -76,10 +74,10 @@
 
   <button id="go" disabled>Process & Clean All SVGs</button>
   <button id="pack" disabled>Start Smart Packing →</button>
-  <button id="vectoriseImages" disabled>Vectorise Images (Trace Bitmap)</button>
   <button id="dlSvg">Download Final SVG</button>
   <button id="dlPdf">Download PDF</button>
   <button id="reset">Reset</button>
+  <button id="debugMovers">Debug movers → clipboard</button>
 </div>
 
 <div id="out"></div>
@@ -87,18 +85,16 @@
 <div class="info">
   <strong>Pipeline:</strong>
   <ul>
-    <li>Clean + unify pure red cut lines</li>
-    <li>Grayscale + contrast engravings</li>
+    <li>Clean + unify pure red cut lines (on-screen ≈0.2, export = <strong>0.026&nbsp;mm</strong>)</li>
+    <li>Grayscale + contrast images, then vectorise them immediately</li>
     <li>Smart bottom-left packing with snapping and resizable sheet</li>
-    <li><strong>Optional:</strong> Vectorise images (trace bitmap) to paths for lasers that dislike rasters</li>
-    <li>Export SVG or PDF with red cuts forced to <strong>0.026&nbsp;mm</strong></li>
+    <li>Only the main cut outline per part is draggable; engravings move with it</li>
+    <li>Export SVG or PDF (page size = sheet size) named with student + sheet</li>
   </ul>
 </div>
 
-<!-- jsPDF + svg2pdf from CDN -->
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/svg2pdf.js@2.2.0/dist/svg2pdf.umd.min.js"></script>
-<!-- ImageTracer.js for bitmap → SVG tracing -->
 <script src="https://cdn.jsdelivr.net/npm/imagetracerjs@1.2.6/imagetracer_v1.2.6.min.js"></script>
 
 <script>
@@ -108,28 +104,25 @@ let sheetW = 600;
 let sheetH = 400;
 let nextMoverId = 0;
 
-// selection / dragging
 let selectedMover = null;
 let dragState = null;
-
-// sheet resize
 let resizeState = null;
 
 const dropZone       = document.getElementById('dropZone');
 const fileInput      = document.getElementById('files');
 const goBtn          = document.getElementById('go');
 const packBtn        = document.getElementById('pack');
-const vectoriseBtn   = document.getElementById('vectoriseImages');
 const dlSvgBtn       = document.getElementById('dlSvg');
 const dlPdfBtn       = document.getElementById('dlPdf');
 const resetBtn       = document.getElementById('reset');
+const debugMoversBtn = document.getElementById('debugMovers');
 const contrastSlider = document.getElementById('contrast');
 const contrastLabel  = document.getElementById('cVal');
 const out            = document.getElementById('out');
 const nameInput      = document.getElementById('studentName');
 
-const DISPLAY_CUT_WIDTH = 0.2;         // visible on screen (mm-equivalent via viewBox)
-const EXPORT_CUT_WIDTH  = '0.026mm';   // true laser hairline for export
+const DISPLAY_CUT_WIDTH = 0.2;
+const EXPORT_CUT_WIDTH  = '0.026';
 
 dropZone.onclick = () => fileInput.click();
 fileInput.onchange = e => loadFiles(e.target.files);
@@ -146,14 +139,12 @@ dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
 
 contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
 
-goBtn.onclick        = processAll;
-packBtn.onclick      = () => doPacking(false, false);
-vectoriseBtn.onclick = () => vectoriseImages();
-dlSvgBtn.onclick     = downloadFinalSVG;
-dlPdfBtn.onclick     = downloadPDF;
-resetBtn.onclick     = () => location.reload();
-
-/* ---------- helpers ---------- */
+goBtn.onclick          = processAll;
+packBtn.onclick        = () => doPacking(false, false);
+dlSvgBtn.onclick       = downloadFinalSVG;
+dlPdfBtn.onclick       = downloadPDF;
+resetBtn.onclick       = () => location.reload();
+debugMoversBtn.onclick = copyMoversDebugToClipboard;
 
 function requireStudentName() {
   const name = nameInput.value.trim();
@@ -196,19 +187,113 @@ function safeBBox(node) {
   return null;
 }
 
-function rebuildMoversPreservingPositions() {
-  if (!finalSVG) return;
-  const svgEl = finalSVG;
+/* --- NEW: remove duplicated elements (by id and Bart clones) --- */
+/* --- NEW: remove duplicated elements (by id, Bart clones, and duplicate cuts) --- */
+function dedupeSvgElements(svgRoot) {
+  const seenIds = new Set();
+  const seenImagePaths = new Set();
 
-  // Push any remaining group transforms down onto shapes, then flatten groups
-  propagateTransforms(svgEl);
-  explodeGroupsToShapes(svgEl);
-  stripEditorAttrs(svgEl);
-  buildMoversFromOverlap(svgEl);
+  const all = [
+    ...svgRoot.querySelectorAll(
+      'rect, ellipse, path, text, circle, polygon, polyline, line, image, g'
+    )
+  ];
+
+  // 1) simple id + data-from-image dedupe (as before)
+  for (const el of all) {
+    const id = el.getAttribute('id');
+
+    // Only keep the first element with a given id
+    if (id) {
+      if (seenIds.has(id)) {
+        el.remove();
+        continue;
+      }
+      seenIds.add(id);
+    }
+
+    // data-from-image (Bart etc): dedupe exact d+transform
+    if (el.matches && el.matches('path[data-from-image="true"]')) {
+      const sig =
+        (el.getAttribute('d') || '') +
+        '|' +
+        (el.getAttribute('transform') || '');
+      if (seenImagePaths.has(sig)) {
+        el.remove();
+        continue;
+      }
+      seenImagePaths.add(sig);
+    }
+  }
+
+  // 2) EXTRA: dedupe duplicate CUT paths with same d + almost same bbox
+  const cutPaths = Array.from(
+    svgRoot.querySelectorAll('path[data-cut-line="true"]')
+  );
+
+  function bboxOrNull(node) {
+    try {
+      if (typeof node.getBBox === 'function') {
+        const bb = node.getBBox();
+        if (
+          isFinite(bb.x) && isFinite(bb.y) &&
+          isFinite(bb.width) && isFinite(bb.height) &&
+          bb.width > 0 && bb.height > 0
+        ) {
+          return bb;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  for (let i = 0; i < cutPaths.length; i++) {
+    const a = cutPaths[i];
+    if (!a || !a.parentNode) continue;
+
+    const dA = a.getAttribute('d') || '';
+    if (!dA) continue;
+
+    const bbA = bboxOrNull(a);
+    if (!bbA) continue;
+
+    const areaA = bbA.width * bbA.height;
+    const cxA = bbA.x + bbA.width / 2;
+    const cyA = bbA.y + bbA.height / 2;
+
+    for (let j = i + 1; j < cutPaths.length; j++) {
+      const b = cutPaths[j];
+      if (!b || !b.parentNode) continue;
+
+      const dB = b.getAttribute('d') || '';
+      if (dB !== dA) continue; // only care about identical geometry
+
+      const bbB = bboxOrNull(b);
+      if (!bbB) continue;
+
+      const areaB = bbB.width * bbB.height;
+      if (!areaA || !areaB) continue;
+
+      const areaRatio = Math.max(areaA, areaB) / Math.min(areaA, areaB);
+      const cxB = bbB.x + bbB.width / 2;
+      const cyB = bbB.y + bbB.height / 2;
+      const dx = Math.abs(cxA - cxB);
+      const dy = Math.abs(cyA - cyB);
+
+      // tweak tolerances if needed:
+      const sameSize   = areaRatio < 1.02; // within ~2%
+      const sameCentre = dx < 0.5 && dy < 0.5; // almost exactly on top
+
+      if (sameSize && sameCentre) {
+        // remove the later one (b), keep a
+        b.remove();
+      }
+    }
+  }
 }
 
 
-/* ---------- process & clean all SVGs into a master SVG ---------- */
+/* ---------- process & clean all SVGs ---------- */
 
 async function processAll() {
   sheetW = +document.getElementById('w').value || 600;
@@ -229,41 +314,49 @@ async function processAll() {
     const svg  = doc.querySelector('svg');
     if (!svg) continue;
 
-    // Simple translate baker (only handles translate())
-    svg.querySelectorAll('*').forEach(el => {
-      const t = el.getAttribute('transform') || '';
-      if (t.includes('translate')) {
-        const m = t.match(/translate\(([^)]+)\)/);
-        if (m) {
-          const [dx, dy = 0] = m[1].split(/[\s,]+/).map(Number);
-          ['x','x1','x2','cx'].forEach(a => { if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dx); });
-          ['y','y1','y2','cy'].forEach(a => { if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dy); });
-        }
-        el.removeAttribute('transform');
-      }
-    });
+    // inline translate into geometry attrs
+   // inline translate into geometry attrs
+svg.querySelectorAll('*').forEach(el => {
+  // 🚫 Never touch transforms on traced-image paths like Bart
+  if (el.getAttribute('data-from-image') === 'true') return;
 
-    // Fix red lines for display + tag for export
+  const t = el.getAttribute('transform') || '';
+  if (t.includes('translate')) {
+    const m = t.match(/translate\(([^)]+)\)/);
+    if (m) {
+      const [dx, dy = 0] = m[1].split(/[\s,]+/).map(Number);
+      ['x','x1','x2','cx'].forEach(a => {
+        if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dx);
+      });
+      ['y','y1','y2','cy'].forEach(a => {
+        if (el.hasAttribute(a)) el.setAttribute(a, +el.getAttribute(a) + dy);
+      });
+    }
+
+    // You *could* be more clever and only strip the translate() part,
+    // but for now this keeps your old behaviour for everything except
+    // data-from-image shapes.
+    el.removeAttribute('transform');
+  }
+});
+
+
+    // fix red lines
     svg.querySelectorAll('*').forEach(el => {
       const rawStrokeAttr = el.getAttribute('stroke') || '';
       const rawStyle      = el.getAttribute('style') || '';
+      const strokeAttr    = rawStrokeAttr.toLowerCase();
 
-      const strokeAttr = rawStrokeAttr.toLowerCase();
-
-      // Look for stroke colour in style as well
       let strokeFromStyle = '';
       const styleLower = rawStyle.toLowerCase();
       const strokeStyleMatch = styleLower.match(/stroke\s*:\s*([^;]+)/);
       if (strokeStyleMatch) {
         strokeFromStyle = strokeStyleMatch[1].trim();
       }
-
       const strokeValue = strokeAttr || strokeFromStyle;
-
       const isRed = /(#ff0000|#f00|\bred\b|rgb\s*\(\s*255\s*,\s*0\s*,\s*0\s*\))/.test(strokeValue);
       if (!isRed) return;
 
-      // Clean style: remove stroke-related stuff completely
       if (rawStyle) {
         const cleaned = rawStyle
           .split(';')
@@ -280,25 +373,19 @@ async function processAll() {
         else el.removeAttribute('style');
       }
 
-      // Remove any existing stroke-related attributes
       el.removeAttribute('stroke-width');
       el.removeAttribute('stroke-opacity');
       el.removeAttribute('fill');
 
-      // Force our cut settings via attributes
-      el.setAttribute('stroke', '#ff0000');      // 255,0,0
+      el.setAttribute('stroke', '#ff0000');
       el.setAttribute('stroke-opacity', '1');
       el.setAttribute('fill', 'none');
-
-      // Visible hairline for editing (browser-friendly)
       el.setAttribute('stroke-width', String(DISPLAY_CUT_WIDTH));
       el.setAttribute('vector-effect', 'non-scaling-stroke');
-
-      // Tag as a cut line so we can override on export
       el.setAttribute('data-cut-line', 'true');
     });
 
-    // Clean images: grayscale + contrast ONLY (keep bitmap, fewer artefacts)
+    // grayscale + contrast bitmap images
     for (const img of svg.querySelectorAll('image')) {
       let src = img.getAttribute('href') || img.getAttribute('xlink:href');
       if (src && src.startsWith('data:image')) {
@@ -319,11 +406,14 @@ async function processAll() {
       }
     }
 
-    // Collect all graphical elements into master
+    // append shapes into master
     svg.querySelectorAll('path,rect,circle,ellipse,polygon,polyline,line,text,image,use,g').forEach(el => {
       master.appendChild(el.cloneNode(true));
     });
   }
+
+  // 🔴 NEW: remove duplicates by id and image-path signature
+  dedupeSvgElements(master);
 
   out.innerHTML = '';
   master.style.maxWidth = "100%";
@@ -340,19 +430,13 @@ async function processAll() {
     if (e.target === finalSVG) setSelectedMover(null);
   });
 
-  alert("All SVGs processed & cleaned.\nNow click “Start Smart Packing →” to pack them.");
+  await vectoriseImages(true);
+
+  alert("All SVGs processed, images vectorised. Now click “Start Smart Packing →”.");
 
   packBtn.disabled       = false;
   dlSvgBtn.style.display = 'inline-block';
   dlPdfBtn.style.display = 'inline-block';
-
-  // Enable vectorise button only if there are images
-  if (finalSVG.querySelector('image')) {
-    vectoriseBtn.style.display = 'inline-block';
-    vectoriseBtn.disabled = false;
-  } else {
-    vectoriseBtn.style.display = 'none';
-  }
 }
 
 /* ---------- geometry / movers ---------- */
@@ -424,71 +508,406 @@ function bboxesOverlap(a, b) {
 function unionBBox(a, b) {
   if (!a) return b;
   if (!b) return a;
-  const minX = Math.min(a.x, b.x);
-  const minY = Math.min(a.y, b.y);
-  const maxX = Math.max(a.x + a.width,  b.x + b.width);
-  const maxY = Math.max(a.y + a.height, b.y + b.height);
+  const minX = Math.min(a.x, a.x + a.width, b.x, b.x + b.width);
+  const minY = Math.min(a.y, a.y + a.height, b.y, b.y + b.height);
+  const maxX = Math.max(a.x, a.x + a.width, b.x, b.x + b.width);
+  const maxY = Math.max(a.y, a.y + a.height, b.y, b.y + b.height);
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+
+// intersection area of two bboxes (0 if none)
+function bboxIntersectionArea(a, b) {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.width,  b.x + b.width);
+  const y2 = Math.min(a.y + a.height, b.y + b.height);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  return (x2 - x1) * (y2 - y1);
+}
+
+
+
 function setSelectedMover(m) { selectedMover = m; }
+
+/* ---------- build movers ---------- */
 
 function buildMoversFromOverlap(rootContainer) {
   movers = [];
   nextMoverId = 0;
 
   const allShapes = Array.from(
-    rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
-  );
+    rootContainer.querySelectorAll(
+      "path, rect, circle, ellipse, polygon, polyline, line, image, text"
+    )
+  ).filter(isShapeOrImage);
 
+  const shapeInfos = [];
   allShapes.forEach(el => {
-    if (!isShapeOrImage(el)) return;
     const bb = safeBBox(el);
     if (!bb) return;
-    const baseBBox = { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
+    shapeInfos.push({
+      el,
+      bb,
+      isCut: el.getAttribute("data-cut-line") === "true"
+    });
+  });
+
+
+//const otherInfos = shapeInfos.filter(s => !s.isCut);
+  const cutInfos   = shapeInfos.filter(s => s.isCut);
+  const otherInfos = shapeInfos.filter(s => !s.isCut);
+
+  // ---------- fallback: no cut lines at all ----------
+  if (!cutInfos.length) {
+    shapeInfos.forEach(info => {
+      const mbt = new Map();
+      mbt.set(info.el, info.el.getAttribute("transform") || "");
+      movers.push({
+        id: nextMoverId++,
+        members: [info.el],
+        baseBBox: {
+          x: info.bb.x,
+          y: info.bb.y,
+          width: info.bb.width,
+          height: info.bb.height
+        },
+        memberBaseTransforms: mbt,
+        tx: 0,
+        ty: 0,
+        hasCut: false
+      });
+    });
+
+    // merge overlapping movers (for pure engrave jobs)
+    let changed = true;
+    while (changed) {
+      changed = false;
+      outer_fb: for (let i = 0; i < movers.length; i++) {
+        for (let j = i + 1; j < movers.length; j++) {
+          const a = movers[i];
+          const b = movers[j];
+          if (bboxesOverlap(a.baseBBox, b.baseBBox)) {
+            a.members = a.members.concat(b.members);
+            b.members.forEach(el => {
+              if (!a.memberBaseTransforms.has(el)) {
+                a.memberBaseTransforms.set(
+                  el,
+                  b.memberBaseTransforms.get(el) || ""
+                );
+              }
+            });
+            a.baseBBox = unionBBox(a.baseBBox, b.baseBBox);
+            movers.splice(j, 1);
+            changed = true;
+            break outer_fb;
+          }
+        }
+      }
+    }
+
+    markMoverHandles();
+    return;
+  }
+
+  // ---------- normal case: we have red cut lines ----------
+
+  function bboxContains(bb, x, y, pad = 0) {
+    return (
+      x >= bb.x - pad &&
+      x <= bb.x + bb.width + pad &&
+      y >= bb.y - pad &&
+      y <= bb.y + bb.height + pad
+    );
+  }
+
+  // decorate cutInfos
+  cutInfos.forEach(info => {
+    info.cx = info.bb.x + info.bb.width  / 2;
+    info.cy = info.bb.y + info.bb.height / 2;
+    info.area = info.bb.width * info.bb.height;
+    info.container = null;
+  });
+
+  // find containing cut for each smaller cut
+  cutInfos.forEach(info => {
+    let bestContainer = null;
+    cutInfos.forEach(other => {
+      if (other === info) return;
+      if (other.area <= info.area) return;
+      if (!bboxContains(other.bb, info.cx, info.cy, 0.01)) return;
+      if (!bestContainer || other.area < bestContainer.area) {
+        bestContainer = other;
+      }
+    });
+    info.container = bestContainer;
+  });
+
+  // primary cut = no container
+  const primaryCuts = cutInfos.filter(ci => !ci.container);
+  const childCutsByPrimary = new Map();
+  primaryCuts.forEach(ci => childCutsByPrimary.set(ci, []));
+  cutInfos.forEach(ci => {
+    if (ci.container) {
+      const arr = childCutsByPrimary.get(ci.container);
+      if (arr) arr.push(ci);
+    }
+  });
+
+  const moverByElement = new Map();
+
+  // 1) primary cut → mover (baseBBox from CUTS ONLY)
+  primaryCuts.forEach(info => {
     const mbt = new Map();
-    mbt.set(el, el.getAttribute("transform") || "");
-    movers.push({
+    mbt.set(info.el, info.el.getAttribute("transform") || "");
+
+    let baseBBox = {
+      x: info.bb.x,
+      y: info.bb.y,
+      width: info.bb.width,
+      height: info.bb.height
+    };
+
+    const members = [info.el];
+
+    const children = childCutsByPrimary.get(info) || [];
+    children.forEach(child => {
+      members.push(child.el);
+      mbt.set(child.el, child.el.getAttribute("transform") || "");
+      // child is also a CUT → union into baseBBox
+      baseBBox = unionBBox(baseBBox, child.bb);
+    });
+
+    const m = {
       id: nextMoverId++,
-      members: [el],
+      members,
       baseBBox,
       memberBaseTransforms: mbt,
       tx: 0,
-      ty: 0
-    });
+      ty: 0,
+      hasCut: true
+    };
+    movers.push(m);
+    members.forEach(el => moverByElement.set(el, m));
   });
+
+otherInfos.forEach(info => {
+  const bb = info.bb;
+
+  // find center of this engrave
+  const center = {
+    x: bb.x + bb.width / 2,
+    y: bb.y + bb.height / 2
+  };
+
+  let bestMover = null;
+  let bestScore = Infinity;
+
+  // 1) try to find an overlapping primary cut
+  primaryCuts.forEach(cutInfo => {
+    const m = moverByElement.get(cutInfo.el);
+    if (!m) return;
+
+    // if their bboxes don't overlap at all, skip
+    if (!bboxesOverlap(bb, cutInfo.bb)) return;
+
+    const ccx = cutInfo.bb.x + cutInfo.bb.width / 2;
+    const ccy = cutInfo.bb.y + cutInfo.bb.height / 2;
+    const dx = center.x - ccx;
+    const dy = center.y - ccy;
+    const dist2 = dx * dx + dy * dy;
+
+    if (dist2 < bestScore) {
+      bestScore = dist2;
+      bestMover = m;
+    }
+  });
+
+  // 2) fallback: nearest primary cut by distance if no overlap
+  if (!bestMover) {
+    primaryCuts.forEach(cutInfo => {
+      const m = moverByElement.get(cutInfo.el);
+      if (!m) return;
+
+      const ccx = cutInfo.bb.x + cutInfo.bb.width / 2;
+      const ccy = cutInfo.bb.y + cutInfo.bb.height / 2;
+      const dx = center.x - ccx;
+      const dy = center.y - ccy;
+      const dist2 = dx * dx + dy * dy;
+
+      if (dist2 < bestScore) {
+        bestScore = dist2;
+        bestMover = m;
+      }
+    });
+  }
+
+  if (bestMover) {
+    // ✅ attach Bart (and other engraves) to the mover
+    bestMover.members.push(info.el);
+    bestMover.memberBaseTransforms.set(
+      info.el,
+      info.el.getAttribute("transform") || ""
+    );
+
+    // make sure DOM is marked so drag code picks it up
+    info.el.classList.add("mover-member");
+    info.el.setAttribute("data-mover-id", bestMover.id);
+    // engraves should not be individually draggable:
+    info.el.style.pointerEvents = "none";
+  } else {
+    // nothing suitable → leave frozen
+    info.el.classList.remove("mover-member");
+    info.el.removeAttribute("data-mover-id");
+    info.el.style.pointerEvents = "none";
+  }
+});
+
+
+  // 3) merge movers when CUT outlines overlap (ignore engraves for merging)
+  function moverCutBBox(m) {
+    let bb = null;
+    m.members.forEach(el => {
+      if (el.getAttribute("data-cut-line") === "true") {
+        const thisBB = safeBBox(el);
+        if (thisBB) {
+          bb = unionBBox(bb, thisBB);
+        }
+      }
+    });
+    return bb;
+  }
 
   let changed = true;
   while (changed) {
     changed = false;
-    outer: for (let i = 0; i < movers.length; i++) {
+    outer_merge: for (let i = 0; i < movers.length; i++) {
       for (let j = i + 1; j < movers.length; j++) {
         const a = movers[i];
         const b = movers[j];
-        if (bboxesOverlap(a.baseBBox, b.baseBBox)) {
+        if (!a.hasCut || !b.hasCut) continue;
+
+        const cutA = moverCutBBox(a);
+        const cutB = moverCutBBox(b);
+        if (!cutA || !cutB) continue;
+
+        if (bboxesOverlap(cutA, cutB)) {
           a.members = a.members.concat(b.members);
           b.members.forEach(el => {
             if (!a.memberBaseTransforms.has(el)) {
-              a.memberBaseTransforms.set(el, b.memberBaseTransforms.get(el) || "");
+              a.memberBaseTransforms.set(
+                el,
+                b.memberBaseTransforms.get(el) || ""
+              );
             }
           });
+          // baseBBox is still cut-only (union of cut boxes)
           a.baseBBox = unionBBox(a.baseBBox, b.baseBBox);
           movers.splice(j, 1);
           changed = true;
-          break outer;
+          break outer_merge;
         }
       }
     }
   }
 
+  markMoverHandles();
+}
+
+
+
+
+
+/* --- choose a single handle element per mover --- */
+function markMoverHandles() {
   movers.forEach(m => {
+    let handleEl = null;
+    let maxArea = -1;
+
     m.members.forEach(el => {
-      el.classList.add('mover-member');
+      const isCut = el.getAttribute('data-cut-line') === 'true';
+      if (!isCut) return;
+      const bb = safeBBox(el);
+      if (!bb) return;
+      const area = bb.width * bb.height;
+      if (area > maxArea) {
+        maxArea = area;
+        handleEl = el;
+      }
+    });
+
+    if (!handleEl) {
+      m.members.forEach(el => {
+        const bb = safeBBox(el);
+        if (!bb) return;
+        const area = bb.width * bb.height;
+        if (area > maxArea) {
+          maxArea = area;
+          handleEl = el;
+        }
+      });
+    }
+
+    m.members.forEach(el => {
       el.dataset.moverId = String(m.id);
-      el.setAttribute('pointer-events', 'bounding-box');
-      el.onmousedown = moverMouseDown;
+
+      if (el === handleEl) {
+        el.classList.add('mover-member');
+        el.setAttribute('pointer-events', 'bounding-box');
+        el.onmousedown = moverMouseDown;
+      } else {
+        el.classList.remove('mover-member');
+        el.setAttribute('pointer-events', 'none');
+        el.onmousedown = null;
+      }
     });
   });
+}
+
+/* ---------- debug ---------- */
+
+function moversDebugString() {
+  if (!finalSVG) return "No finalSVG.\n";
+  if (!movers || !movers.length) return "No movers.\n";
+
+  let outStr = `Sheet: ${sheetW} x ${sheetH} mm\nMover count: ${movers.length}\n\n`;
+
+  movers.forEach(m => {
+    outStr += `Mover #${m.id} (hasCut=${!!m.hasCut})\n`;
+    outStr += `  baseBBox: x=${m.baseBBox.x.toFixed(2)}, y=${m.baseBBox.y.toFixed(2)}, w=${m.baseBBox.width.toFixed(2)}, h=${m.baseBBox.height.toFixed(2)}\n`;
+    outStr += `  tx=${(m.tx||0).toFixed(2)}, ty=${(m.ty||0).toFixed(2)}\n`;
+    outStr += `  members (${m.members.length}):\n`;
+
+    m.members.forEach(el => {
+      const tag = el.tagName.toLowerCase();
+      const id  = el.id ? `#${el.id}` : "";
+      const cut = el.getAttribute("data-cut-line") === "true" ? " CUT" : "";
+      const fromImg = el.getAttribute("data-from-image") ? " IMG" : "";
+      const dLen = el.getAttribute("d") ? ` dLen=${el.getAttribute("d").length}` : "";
+      outStr += `    - <${tag}${id}>${cut}${fromImg}${dLen}\n`;
+    });
+
+    outStr += `\n`;
+  });
+
+  return outStr;
+}
+
+function copyMoversDebugToClipboard() {
+  const text = moversDebugString();
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => alert("Mover debug info copied to clipboard. Paste it into ChatGPT."),
+      err => {
+        console.error(err);
+        alert("Failed to copy debug info. Check console; text logged there.");
+        console.log(text);
+      }
+    );
+  } else {
+    alert("Clipboard API not available. Debug text printed to console.");
+    console.log(text);
+  }
 }
 
 /* ---------- bottom-left packing ---------- */
@@ -550,7 +969,7 @@ function applyMoverTransform(m) {
   });
 }
 
-/* ---------- fit whole layout into sheet if possible ---------- */
+/* ---------- fit layout ---------- */
 
 function fitLayoutIntoSheet() {
   if (!movers.length) return true;
@@ -696,7 +1115,7 @@ function moverMouseUp(e) {
 }
 
 function snapMoverToNeighbours(m) {
-  const snapTol = 20; // snap radius
+  const snapTol = 20;
 
   const mBox = {
     x: m.baseBBox.x + m.tx,
@@ -716,7 +1135,7 @@ function snapMoverToNeighbours(m) {
     let s = Math.abs(d);
     if (kind === "shape") s -= 1.0;
     if (kind === "sheet") s -= 0.3;
-    if (d < 0) s -= 0.2; // favour left
+    if (d < 0) s -= 0.2;
     return s;
   };
 
@@ -724,11 +1143,10 @@ function snapMoverToNeighbours(m) {
     let s = Math.abs(d);
     if (kind === "shape") s -= 1.0;
     if (kind === "sheet") s -= 0.3;
-    if (d < 0) s -= 0.2; // favour up
+    if (d < 0) s -= 0.2;
     return s;
   };
 
-  // snaps to other movers
   movers.forEach(n => {
     if (n === m) return;
     const nBox = {
@@ -742,7 +1160,6 @@ function snapMoverToNeighbours(m) {
     const nTop = nBox.y;
     const nBottom = nBox.y + nBox.height;
 
-    // X axis
     let dX = nLeft - mRight;
     if (Math.abs(dX) < snapTol) {
       const s = scoreX(dX, "shape");
@@ -754,7 +1171,6 @@ function snapMoverToNeighbours(m) {
       if (s < bestDxScore) { bestDxScore = s; bestDx = dX; }
     }
 
-    // Y axis
     let dY = nTop - mBottom;
     if (Math.abs(dY) < snapTol) {
       const s = scoreY(dY, "shape");
@@ -767,7 +1183,6 @@ function snapMoverToNeighbours(m) {
     }
   });
 
-  // snaps to sheet boundaries
   let dX = 0 - mLeft;
   if (Math.abs(dX) < snapTol) {
     const s = scoreX(dX, "sheet");
@@ -796,7 +1211,7 @@ function snapMoverToNeighbours(m) {
   }
 }
 
-/* ---------- resizable sheet (BR handle) ---------- */
+/* ---------- resizable sheet ---------- */
 
 function addResizeHandle() {
   if (!finalSVG) return;
@@ -881,7 +1296,6 @@ function stopSheetResize(e) {
   window.removeEventListener('mousemove', doSheetResize);
   window.removeEventListener('mouseup', stopSheetResize);
 
-  // re-pack existing movers only
   repackExisting(true, true);
 }
 
@@ -891,21 +1305,18 @@ function getFileBaseName() {
   const name = requireStudentName();
   if (!name) return null;
   let base = name.trim();
-  base = base.replace(/[^\w\-]+/g, '_'); // safe for filenames
+  base = base.replace(/[^\w\-]+/g, '_');
   return `${base}_${sheetW}x${sheetH}mm`;
 }
 
-// clone + force export stroke widths etc.
 function prepareExportSVG() {
   if (!finalSVG) return null;
 
   const exportSVG = finalSVG.cloneNode(true);
 
-  // Remove resize handle from export
   const handle = exportSVG.querySelector('#resizeHandle');
   if (handle) handle.remove();
 
-  // Force all cut lines to exact 0.026 mm and clean styles again
   exportSVG.querySelectorAll('[data-cut-line="true"]').forEach(el => {
     const rawStyle = el.getAttribute('style') || '';
     if (rawStyle) {
@@ -924,7 +1335,6 @@ function prepareExportSVG() {
       else el.removeAttribute('style');
     }
 
-    // Nuke any stroke-related attributes, then set ours
     el.removeAttribute('stroke-width');
     el.removeAttribute('stroke-opacity');
     el.removeAttribute('fill');
@@ -936,7 +1346,6 @@ function prepareExportSVG() {
     el.setAttribute('vector-effect', 'non-scaling-stroke');
   });
 
-  // Ensure the export SVG has explicit mm size
   exportSVG.setAttribute('width', sheetW + 'mm');
   exportSVG.setAttribute('height', sheetH + 'mm');
   exportSVG.setAttribute('viewBox', `0 0 ${sheetW} ${sheetH}`);
@@ -966,13 +1375,13 @@ function downloadFinalSVG() {
   URL.revokeObjectURL(url);
 }
 
-/* ---------- PDF download via jsPDF + svg2pdf ---------- */
+/* ---------- PDF download ---------- */
 
 async function downloadPDF() {
   if (!finalSVG) return;
 
   const baseName = getFileBaseName();
-  if (!baseName) return; // enforces student name
+  if (!baseName) return;
 
   if (!window.jspdf || !window.jspdf.jsPDF || !window.svg2pdf) {
     alert("PDF libraries not loaded. Check your internet connection or host jsPDF/svg2pdf locally.");
@@ -982,7 +1391,6 @@ async function downloadPDF() {
   const exportSVG = prepareExportSVG();
   if (!exportSVG) return;
 
-  // mm → pt (1 in = 25.4 mm, 1 in = 72 pt → 1 mm ≈ 72/25.4 pt)
   const mmToPt = mm => mm * 72 / 25.4;
   const widthMm  = sheetW;
   const heightMm = sheetH;
@@ -1013,17 +1421,18 @@ async function downloadPDF() {
   }
 }
 
-async function vectoriseImages() {
-  if (!finalSVG) return;
+/* ---------- image → vector (merge to single path) ---------- */
 
+async function vectoriseImages(silent = false) {
+  if (!finalSVG) return;
   if (typeof ImageTracer === 'undefined' || !ImageTracer.imagedataToSVG) {
-    alert("ImageTracer library not loaded. Check your internet connection or host imagetracer locally.");
+    if (!silent) alert("ImageTracer library not loaded.");
     return;
   }
 
   const images = Array.from(finalSVG.querySelectorAll('image'));
   if (!images.length) {
-    alert('No images to vectorise.');
+    if (!silent) alert('No images to vectorise.');
     return;
   }
 
@@ -1031,26 +1440,9 @@ async function vectoriseImages() {
     let href = imgEl.getAttribute('href') || imgEl.getAttribute('xlink:href');
     if (!href || !href.startsWith('data:image')) continue;
 
-    // --- 1) Find the mover this image currently belongs to (if any) ---
-    let parentMover = null;
-    if (movers && movers.length) {
-      // if dataset.moverId exists, prefer it
-      const idAttr = imgEl.dataset && imgEl.dataset.moverId;
-      if (idAttr != null) {
-        const idNum = +idAttr;
-        parentMover = movers.find(m => m.id === idNum) || null;
-      }
-      // fallback: brute force search
-      if (!parentMover) {
-        parentMover = movers.find(m => m.members.includes(imgEl)) || null;
-      }
-    }
+    const imgBB = safeBBox(imgEl);
+    if (!imgBB || !imgBB.width || !imgBB.height) continue;
 
-    // --- 2) Current position of the image in sheet coords (after packing) ---
-    const bb = safeBBox(imgEl);
-    if (!bb) continue; // can't place if we don't know where it is
-
-    // --- 3) Load bitmap and trace it ---
     const bitmap = await loadImage(href);
 
     const canvas = document.createElement('canvas');
@@ -1061,7 +1453,6 @@ async function vectoriseImages() {
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-    // A few colours -> smoother edge; we'll collapse to black later
     const options = {
       numberofcolors: 6,
       ltres: 1,
@@ -1072,36 +1463,10 @@ async function vectoriseImages() {
     };
 
     const svgString = ImageTracer.imagedataToSVG(imageData, options);
-
     const tmpDoc    = new DOMParser().parseFromString(svgString, 'image/svg+xml');
     const tracedSvg = tmpDoc.querySelector('svg');
     if (!tracedSvg) continue;
 
-    // --- 4) Source SVG size + viewBox offset (for scaling correctly) ---
-    let vb   = tracedSvg.viewBox && tracedSvg.viewBox.baseVal ? tracedSvg.viewBox.baseVal : null;
-    let srcX = 0, srcY = 0, srcW = bitmap.width, srcH = bitmap.height;
-
-    if (vb && vb.width > 0 && vb.height > 0) {
-      srcX = vb.x;
-      srcY = vb.y;
-      srcW = vb.width;
-      srcH = vb.height;
-    } else {
-      const tw = parseFloat(tracedSvg.getAttribute('width')  || srcW);
-      const th = parseFloat(tracedSvg.getAttribute('height') || srcH);
-      if (tw > 0 && th > 0) { srcW = tw; srcH = th; }
-      // origin assumed 0,0
-    }
-
-    // We want the traced art to exactly fill the image's *current* bounding box
-    const sx = bb.width  / srcW;
-    const sy = bb.height / srcH;
-
-    // Placement transform based on CURRENT bbox (after packing)
-    const placementTransform =
-      `translate(${bb.x},${bb.y}) scale(${sx},${sy}) translate(${-srcX},${-srcY})`;
-
-    // --- 5) Helper: fill -> brightness, so we can drop light junk and keep dark bits ---
     function fillBrightness(fill) {
       if (!fill) return 1;
       fill = fill.trim().toLowerCase();
@@ -1128,79 +1493,74 @@ async function vectoriseImages() {
           g = parseFloat(rgbMatch[2]);
           b = parseFloat(rgbMatch[3]);
         } else {
-          // unknown / none -> assume light
           return 1;
         }
       }
-      const brightness = (r + g + b) / (3 * 255);
-      return brightness;
+      return (r + g + b) / (3 * 255);
     }
 
-    const BRIGHTNESS_THRESHOLD = 0.7; // lower = more detail, higher = bolder
+    const BRIGHTNESS_THRESHOLD = 0.7;
 
-    // --- 6) Move traced children into the main SVG, in the right place ---
-    const newMembers = []; // children we’ll add to the parent mover (if there is one)
+    const keptPaths = [];
 
     Array.from(tracedSvg.children).forEach(child => {
       const tag = child.tagName ? child.tagName.toLowerCase() : '';
-      if (!tag) return;
+      if (tag !== 'path') return;
 
       const fill = (child.getAttribute('fill') || '').trim().toLowerCase();
       const bright = fillBrightness(fill);
-
-      // Drop very light / white shapes – removes background + halo/junk
       if (bright > BRIGHTNESS_THRESHOLD) {
         return;
       }
 
-      // Combine placement transform with any existing child transform
-      const childTransform = child.getAttribute('transform') || '';
-      const combined = (placementTransform + ' ' + childTransform).trim();
-      if (combined) {
-        child.setAttribute('transform', combined);
-      } else {
-        child.removeAttribute('transform');
-      }
-
-      // Force everything that survives to pure black, no stroke
       child.setAttribute('fill', '#000000');
       child.removeAttribute('stroke');
+      child.removeAttribute('stroke-width');
+      child.removeAttribute('transform');
 
-      finalSVG.appendChild(child);
-      newMembers.push(child);
+      const d = child.getAttribute('d');
+      if (d && d.trim()) {
+        keptPaths.push(d.trim());
+      }
     });
 
-    // --- 7) Update mover data so Bart stays in the same mover ---
-    if (parentMover && newMembers.length) {
-      // remove the old image from that mover
-      const idx = parentMover.members.indexOf(imgEl);
-      if (idx !== -1) parentMover.members.splice(idx, 1);
-      parentMover.memberBaseTransforms.delete(imgEl);
-
-      // add new traced shapes as members of that same mover
-      newMembers.forEach(ch => {
-        parentMover.members.push(ch);
-        parentMover.memberBaseTransforms.set(ch, ch.getAttribute('transform') || "");
-
-        const bbChild = safeBBox(ch);
-        if (bbChild) {
-          parentMover.baseBBox = unionBBox(parentMover.baseBBox, {
-            x: bbChild.x,
-            y: bbChild.y,
-            width: bbChild.width,
-            height: bbChild.height
-          });
-        }
-      });
+    if (!keptPaths.length) {
+      continue;
     }
 
-    // --- 8) Finally, remove the original bitmap from the SVG ---
+    const mergedPathEl = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    mergedPathEl.setAttribute('d', keptPaths.join(' '));
+    mergedPathEl.setAttribute('fill', '#000000');
+    mergedPathEl.setAttribute('data-from-image', 'true');
+
+    finalSVG.appendChild(mergedPathEl);
+
+    const vectBB = safeBBox(mergedPathEl);
+    if (!vectBB || !vectBB.width || !vectBB.height) {
+      mergedPathEl.remove();
+      continue;
+    }
+
+    const sx = imgBB.width  / vectBB.width;
+    const sy = imgBB.height / vectBB.height;
+
+    const tx1 = -vectBB.x;
+    const ty1 = -vectBB.y;
+    const tx2 =  imgBB.x;
+    const ty2 =  imgBB.y;
+
+    const groupTransform =
+      `translate(${tx2},${ty2}) scale(${sx},${sy}) translate(${tx1},${ty1})`;
+
+    mergedPathEl.setAttribute('transform', groupTransform);
+
     imgEl.remove();
   }
 
-  alert('Images vectorised to a single black engraving, staying attached to their original movers.');
+  if (!silent) {
+    alert('Images vectorised to black engravings.');
+  }
 }
-
 
 function loadImage(src) {
   return new Promise((resolve, reject) => {
