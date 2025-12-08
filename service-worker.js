@@ -1,4 +1,4 @@
-const CACHE_NAME = 'laserprep-cache-v6';
+const CACHE_NAME = 'laserprep-cache-v7';
 
 const PRECACHE_ASSETS = [
   './',
