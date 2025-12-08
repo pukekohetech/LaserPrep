@@ -9,40 +9,61 @@
   <meta name="theme-color" content="#cc0000">
   <meta name="description" content="Offline laser cutter SVG prep tool with smart packing and PDF export.">
 
-  <!-- PWA manifest + icons (icons folder added in step 4) -->
+  <!-- PWA manifest + icons -->
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
-  <!-- Styles moved out of inline <style> -->
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-<h1> PHS - Laser SVG Prep — Smart Packing Edition </h1>
+<h1>PHS - Laser SVG Prep — Smart Packing Edition</h1>
 <p>Drop Inkscape SVGs → clean red lines, engraving images, smart packing, and SVG/PDF export.</p>
 
 <div class="drop" id="dropZone">Drop SVG files here or click</div>
 <input type="file" id="files" accept=".svg" multiple style="display:none">
 
 <div class="controls">
-  Sheet size 
-  <input type="number" id="w" value="600" style="width:90px"> ×
-  <input type="number" id="h" value="400" style="width:90px"> mm
-  &nbsp;&nbsp;Student name
-  <input type="text" id="studentName" placeholder="Student name" style="width:180px">
+  <div style="margin-bottom:12px;">
+    Sheet size
+    <input type="number" id="w" value="600" style="width:90px"> ×
+    <input type="number" id="h" value="400" style="width:90px"> mm
+    &nbsp;&nbsp;Student name
+    <input type="text" id="studentName" placeholder="Student name" style="width:180px">
+  </div>
+
+  <hr style="margin:10px 0 15px;">
+
+  <div style="font-weight:bold; margin-bottom:6px;">Engraving settings</div>
 
   <div class="slider">
-    Engraving contrast <span id="cVal">1.80</span>×
+    Contrast boost&nbsp;
+    <span id="cVal">1.80</span>×
     <input type="range" id="contrast" min="0.5" max="5" step="0.1" value="1.8">
   </div>
 
-  <!-- go/pack remain as "manual override" buttons, but processing happens automatically on file load -->
-  <button id="go" disabled>Re-process All SVGs</button>
-  <button id="pack" disabled>Re-pack Now</button>
-  <button id="dlSvg">Download Final SVG</button>
-  <button id="dlPdf">Download PDF</button>
-  <button id="reset">Reset</button>
+  <div class="slider">
+    Background cleanup&nbsp;
+    <span id="bgVal">245</span>
+    <input type="range" id="bgThreshold" min="200" max="255" step="1" value="245">
+    <div style="font-size:0.85em; color:#555; margin-top:4px;">
+      Higher = remove more light pixels (good for photos/screenshots that show boxes).
+    </div>
+  </div>
+
+  <label style="display:inline-flex; align-items:center; gap:6px; font-size:0.95em; margin-top:4px;">
+    <input type="checkbox" id="forceBlack" checked>
+    Pure black engraving (best for line art / cartoons)
+  </label>
+
+  <div style="margin-top:16px;">
+    <button id="go" disabled>Re-process All SVGs</button>
+    <button id="pack" disabled>Re-pack Now</button>
+    <button id="dlSvg">Download Final SVG</button>
+    <button id="dlPdf">Download PDF</button>
+    <button id="reset">Reset</button>
+  </div>
 </div>
 
 <div id="out"></div>
@@ -59,7 +80,7 @@
   100% offline • Multiple files • Exports SVG + PDF
 </div>
 
-<!-- jsPDF + svg2pdf from local copies (better for offline) -->
+<!-- jsPDF + svg2pdf from local copies (offline-safe) -->
 <script src="jspdf.umd.min.js"></script>
 <script src="svg2pdf.umd.js"></script>
 
@@ -79,6 +100,8 @@ let resizeState = null;
 
 const DISPLAY_CUT_WIDTH = 0.2;      // screen hairline
 const EXPORT_CUT_WIDTH  = '0.026';  // real laser hairline (mm-ish)
+const HANDLE_SIZE   = 18;           // resize handle size (mm in SVG units)
+const HANDLE_MARGIN = 0;            // inset from sheet edge
 
 /* ---------- DOM refs ---------- */
 
@@ -91,12 +114,11 @@ const dlPdfBtn       = document.getElementById('dlPdf');
 const resetBtn       = document.getElementById('reset');
 const contrastSlider = document.getElementById('contrast');
 const contrastLabel  = document.getElementById('cVal');
+const bgSlider       = document.getElementById('bgThreshold');
+const bgLabel        = document.getElementById('bgVal');
+const forceBlackChk  = document.getElementById('forceBlack');
 const out            = document.getElementById('out');
 const nameInput      = document.getElementById('studentName');
-const HANDLE_SIZE   = 18;   // <— big enough for thumbs
-const HANDLE_MARGIN = 0;   // inset from the corner so phone gestures don’t fight it
-const BACKGROUND_THRESHOLD = 245; // or even 250 if needed
-
 
 /* ---------- basic UI wiring ---------- */
 
@@ -114,6 +136,7 @@ dropZone.ondragleave = dropZone.ondrop = e => {
 dropZone.ondrop = e => loadFiles(e.dataTransfer.files);
 
 contrastSlider.oninput = e => contrastLabel.textContent = e.target.value;
+bgSlider.oninput       = e => bgLabel.textContent       = e.target.value;
 
 // Manual override buttons
 goBtn.onclick    = () => processAll(false);        // show alerts
@@ -172,8 +195,7 @@ function safeBBox(node) {
       if (
         isFinite(bb.x) && isFinite(bb.y) &&
         isFinite(bb.width) && isFinite(bb.height) &&
-        // allow vertical or horizontal lines: at least one dimension > 0
-        (bb.width > 0 || bb.height > 0)
+        (bb.width > 0 || bb.height > 0) // allow pure horizontal/vertical lines
       ) {
         return bb;
       }
@@ -182,7 +204,6 @@ function safeBBox(node) {
 
   return null;
 }
-
 
 /* ---------- processing: clean SVGs into a single master ---------- */
 /* silent = true → no alerts (for auto-run) */
@@ -195,7 +216,10 @@ async function processAll(silent = false) {
 
   sheetW = +document.getElementById('w').value || 600;
   sheetH = +document.getElementById('h').value || 400;
-  const contrast = +document.getElementById('contrast').value;
+
+  const contrast    = +contrastSlider.value || 1.8;
+  const bgThreshold = +bgSlider.value       || 245;
+  const forceBlack  = !!forceBlackChk.checked;
 
   const master = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   master.setAttribute("width", sheetW + "mm");
@@ -262,46 +286,50 @@ async function processAll(silent = false) {
       el.setAttribute('data-cut-line', 'true');
     });
 
-    // Clean images: grayscale + contrast + drop near-white to transparent
-   // Clean images: grayscale + contrast + drop near-white to transparent
-for (const img of svg.querySelectorAll('image')) {
-  let src = img.getAttribute('href') || img.getAttribute('xlink:href');
-  if (src && src.startsWith('data:image')) {
-    src = await new Promise(res => {
-      const i = new Image();
-      i.onload = () => {
-        const c = document.createElement('canvas');
-        c.width = i.width; c.height = i.height;
-        const ctx = c.getContext('2d');
-        ctx.filter = `grayscale(100%) contrast(${contrast})`;
-        ctx.drawImage(i, 0, 0);
+    // Clean images: grayscale + contrast + configurable background removal
+    for (const img of svg.querySelectorAll('image')) {
+      let src = img.getAttribute('href') || img.getAttribute('xlink:href');
+      if (src && src.startsWith('data:image')) {
+        src = await new Promise(res => {
+          const i = new Image();
+          i.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = i.width; c.height = i.height;
+            const ctx = c.getContext('2d');
 
-        const imgData = ctx.getImageData(0,0,c.width,c.height);
-        const d = imgData.data;
-        for (let j = 0; j < d.length; j += 4) {
-          const gray = (d[j] + d[j+1] + d[j+2]) / 3;
+            // Apply grayscale + user contrast
+            ctx.filter = `grayscale(100%) contrast(${contrast})`;
+            ctx.drawImage(i, 0, 0);
 
-          if (gray > BACKGROUND_THRESHOLD) {
-            // very light → treat as background
-            d[j+3] = 0; // fully transparent
-          } else {
-            // keep as engraving: solid black
-            d[j] = 0;
-            d[j+1] = 0;
-            d[j+2] = 0;
-            // alpha left as-is (or set to 255 if you want)
-          }
-        }
-        ctx.putImageData(imgData,0,0);
-        res(c.toDataURL());
-      };
-      i.src = src;
-    });
-    img.setAttribute('href', src);
-    img.removeAttribute('xlink:href');
-  }
-}
+            const imgData = ctx.getImageData(0,0,c.width,c.height);
+            const d = imgData.data;
 
+            for (let j = 0; j < d.length; j += 4) {
+              const r = d[j], g = d[j+1], b = d[j+2];
+              const gray = (r + g + b) / 3;
+
+              if (gray > bgThreshold) {
+                // Treat very light pixels as background
+                d[j+3] = 0; // fully transparent
+              } else if (forceBlack) {
+                // For line art: turn everything else into pure black
+                d[j] = d[j+1] = d[j+2] = 0;
+                // d[j+3] stays as-is (or could be set to 255)
+              } else {
+                // Keep grayscale (after contrast) for shaded engraves
+                // nothing extra to do here
+              }
+            }
+
+            ctx.putImageData(imgData,0,0);
+            res(c.toDataURL());
+          };
+          i.src = src;
+        });
+        img.setAttribute('href', src);
+        img.removeAttribute('xlink:href');
+      }
+    }
 
     // Move all graphics into master
     svg.querySelectorAll('path,rect,circle,ellipse,polygon,polyline,line,text,image,use,g').forEach(el => {
@@ -460,22 +488,20 @@ function buildMoversFromOverlap(rootContainer) {
     }
   }
 
-movers.forEach(m => {
-  m.members.forEach(el => {
-    el.classList.add('mover-member');
-    el.dataset.moverId = String(m.id);
+  movers.forEach(m => {
+    m.members.forEach(el => {
+      el.classList.add('mover-member');
+      el.dataset.moverId = String(m.id);
 
-    // Use the whole bounding box as the hit area
-    el.setAttribute('pointer-events', 'bounding-box');
+      el.setAttribute('pointer-events', 'bounding-box');
 
-    // Mouse drag
-    el.onmousedown = moverMouseDown;
+      // Mouse drag
+      el.onmousedown = moverMouseDown;
 
-    // Touch drag
-    el.addEventListener('touchstart', moverTouchStart, { passive: false });
+      // Touch drag
+      el.addEventListener('touchstart', moverTouchStart, { passive: false });
+    });
   });
-});
-
 }
 
 /* ---------- bottom-left packing ---------- */
@@ -683,13 +709,12 @@ function moverMouseUp(e) {
   window.removeEventListener('mouseup', moverMouseUp);
 }
 
-  function moverTouchStart(e) {
+function moverTouchStart(e) {
   if (!finalSVG) return;
   e.preventDefault();
   e.stopPropagation();
 
   const touch = e.touches[0];
-  // Reuse moverMouseDown logic by faking a mouse event
   moverMouseDown({
     currentTarget: e.currentTarget,
     clientX: touch.clientX,
@@ -698,7 +723,6 @@ function moverMouseUp(e) {
     stopPropagation: () => {}
   });
 
-  // Also wire up touch move/end handlers
   window.addEventListener('touchmove', moverTouchMove, { passive: false });
   window.addEventListener('touchend', moverTouchEnd);
   window.addEventListener('touchcancel', moverTouchEnd);
@@ -725,7 +749,6 @@ function moverTouchEnd(e) {
   window.removeEventListener('touchend', moverTouchEnd);
   window.removeEventListener('touchcancel', moverTouchEnd);
 }
-
 
 function snapMoverToNeighbours(m) {
   const snapTol = 20;
@@ -846,31 +869,17 @@ function addResizeHandle() {
     handle.setAttribute('stroke', '#c00');
     handle.setAttribute('stroke-width', '0.5');
 
-    // IMPORTANT: make touch dragging work
     handle.style.cursor = 'se-resize';
     handle.style.touchAction = 'none';
 
     finalSVG.appendChild(handle);
 
-    // Mouse support
     handle.addEventListener('mousedown', startSheetResize);
-
-    // Touch support
-    handle.addEventListener('touchstart', e => {
-      e.preventDefault();
-      const t = e.touches[0];
-      startSheetResize({
-        preventDefault: () => {},
-        stopPropagation: () => {},
-        clientX: t.clientX,
-        clientY: t.clientY
-      });
-    }, { passive: false });
+    handle.addEventListener('touchstart', startSheetResize, { passive: false });
   }
 
   updateResizeHandle();
 }
-
 
 function updateResizeHandle() {
   if (!finalSVG) return;
@@ -884,13 +893,11 @@ function updateResizeHandle() {
   handle.setAttribute('y', y);
 }
 
-
 function startSheetResize(e) {
   if (!finalSVG) return;
   e.preventDefault();
   e.stopPropagation && e.stopPropagation();
 
-  // Support mouse AND touch
   const point = e.touches ? e.touches[0] : e;
   const pt = clientToSVG(finalSVG, point.clientX, point.clientY);
 
@@ -914,7 +921,6 @@ function doSheetResize(e) {
   if (!resizeState || !finalSVG) return;
   e.preventDefault && e.preventDefault();
 
-  // Mouse or touch
   const point = e.touches ? e.touches[0] : e;
   const pt = clientToSVG(finalSVG, point.clientX, point.clientY);
 
@@ -950,17 +956,14 @@ function stopSheetResize(e) {
 
   resizeState = null;
 
-  // Remove both mouse and touch listeners
   window.removeEventListener('mousemove', doSheetResize);
   window.removeEventListener('mouseup', stopSheetResize);
   window.removeEventListener('touchmove', doSheetResize);
   window.removeEventListener('touchend', stopSheetResize);
   window.removeEventListener('touchcancel', stopSheetResize);
 
-  // Re-pack into the new sheet size when resizing is finished
   repackExisting(true, true); // silent = true
 }
-
 
 /* ---------- auto-tighten sheet before export ---------- */
 
@@ -1003,7 +1006,6 @@ function autoTightenSheet(bounds) {
   const b = bounds || computeContentBounds();
   if (!b) return;
 
-  // Shift everything so content starts at (0,0)
   const shiftX = -b.minX;
   const shiftY = -b.minY;
 
@@ -1018,7 +1020,6 @@ function autoTightenSheet(bounds) {
     el.setAttribute('transform', (base ? base + ' ' + extra : extra).trim());
   });
 
-  // Shrink sheet to tight bounds (rounded to 5mm, min 50mm)
   const usedW = b.usedW;
   const usedH = b.usedH;
   let newW = Math.max(50, Math.round(usedW / 5) * 5);
@@ -1086,10 +1087,6 @@ function prepareExportSVG() {
 function downloadFinalSVG() {
   if (!finalSVG) return;
 
-  // 1) Always ask about tightening sheet
-  //maybePromptToTightenSheet();
-
-  // 2) Then require student name (last warning)
   const baseName = getFileBaseName();
   if (!baseName) return;
 
@@ -1113,10 +1110,6 @@ function downloadFinalSVG() {
 async function downloadPDF() {
   if (!finalSVG) return;
 
-  // 1) Always ask about tightening sheet
- //
-
-  // 2) Then require student name (last warning)
   const baseName = getFileBaseName();
   if (!baseName) return;
 
