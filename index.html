@@ -95,6 +95,7 @@ const out            = document.getElementById('out');
 const nameInput      = document.getElementById('studentName');
 const HANDLE_SIZE   = 18;   // <— big enough for thumbs
 const HANDLE_MARGIN = 0;   // inset from the corner so phone gestures don’t fight it
+const BACKGROUND_THRESHOLD = 245; // or even 250 if needed
 
 
 /* ---------- basic UI wiring ---------- */
@@ -262,33 +263,45 @@ async function processAll(silent = false) {
     });
 
     // Clean images: grayscale + contrast + drop near-white to transparent
-    for (const img of svg.querySelectorAll('image')) {
-      let src = img.getAttribute('href') || img.getAttribute('xlink:href');
-      if (src && src.startsWith('data:image')) {
-        src = await new Promise(res => {
-          const i = new Image();
-          i.onload = () => {
-            const c = document.createElement('canvas');
-            c.width = i.width; c.height = i.height;
-            const ctx = c.getContext('2d');
-            ctx.filter = `grayscale(100%) contrast(${contrast})`;
-            ctx.drawImage(i, 0, 0);
+   // Clean images: grayscale + contrast + drop near-white to transparent
+for (const img of svg.querySelectorAll('image')) {
+  let src = img.getAttribute('href') || img.getAttribute('xlink:href');
+  if (src && src.startsWith('data:image')) {
+    src = await new Promise(res => {
+      const i = new Image();
+      i.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = i.width; c.height = i.height;
+        const ctx = c.getContext('2d');
+        ctx.filter = `grayscale(100%) contrast(${contrast})`;
+        ctx.drawImage(i, 0, 0);
 
-            const imgData = ctx.getImageData(0,0,c.width,c.height);
-            const d = imgData.data;
-            for (let j=0; j<d.length; j+=4) {
-              const gray = (d[j] + d[j+1] + d[j+2]) / 3;
-              if (gray > 235) d[j+3] = 0; // transparent nearly-white
-            }
-            ctx.putImageData(imgData,0,0);
-            res(c.toDataURL());
-          };
-          i.src = src;
-        });
-        img.setAttribute('href', src);
-        img.removeAttribute('xlink:href');
-      }
-    }
+        const imgData = ctx.getImageData(0,0,c.width,c.height);
+        const d = imgData.data;
+        for (let j = 0; j < d.length; j += 4) {
+          const gray = (d[j] + d[j+1] + d[j+2]) / 3;
+
+          if (gray > BACKGROUND_THRESHOLD) {
+            // very light → treat as background
+            d[j+3] = 0; // fully transparent
+          } else {
+            // keep as engraving: solid black
+            d[j] = 0;
+            d[j+1] = 0;
+            d[j+2] = 0;
+            // alpha left as-is (or set to 255 if you want)
+          }
+        }
+        ctx.putImageData(imgData,0,0);
+        res(c.toDataURL());
+      };
+      i.src = src;
+    });
+    img.setAttribute('href', src);
+    img.removeAttribute('xlink:href');
+  }
+}
+
 
     // Move all graphics into master
     svg.querySelectorAll('path,rect,circle,ellipse,polygon,polyline,line,text,image,use,g').forEach(el => {
