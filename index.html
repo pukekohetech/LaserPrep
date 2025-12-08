@@ -46,8 +46,8 @@
   <div class="slider">
     Engraving resolution&nbsp;
     <select id="dpiSelect">
-      <option value="250">250 dpi</option>
-      <option value="3000" selected>3000 dpi</option>
+      <option value="125">125 dpi</option>
+      <option value="250" selected>250 dpi</option>
       <option value="333">333 dpi</option>
       <option value="500">500 dpi</option>
       <option value="600">600 dpi</option>
@@ -258,20 +258,6 @@ function maybeWarnLowDpi(label, pxPerMm) {
   );
 }
 
-function logImageDebug(label, widthMm, pxW) {
-  const dpi = pxW / (widthMm / 25.4);
-  console.log(
-    `%c[IMAGE DEBUG] ${label}\n` +
-    `   SVG width:     ${widthMm.toFixed(2)} mm\n` +
-    `   Pixel width:   ${pxW} px\n` +
-    `   Effective DPI: ${dpi.toFixed(2)} dpi`,
-    "color:#0a0; font-weight:bold"
-  );
-}
-
-
-
-  
 /* ---------- processing: clean SVGs into a single master ---------- */
 /* silent = true → no alerts (for auto-run) */
 
@@ -362,19 +348,16 @@ async function processAll(silent = false) {
           const i = new Image();
           i.onload = () => {
             // 1) Work out physical size in mm from SVG
-      // 1) Work out physical width in mm from SVG
-const widthAttr  = img.getAttribute('width');
-const widthMm    = lengthToMm(widthAttr, i.width);
+            const widthAttr  = img.getAttribute('width');
+            const heightAttr = img.getAttribute('height');
 
-// 2) Target pixel size to match engraver DPI (use width only)
-const pxPerMm = engraveDpi / 25.4;
-const targetWidthPx  = Math.max(1, Math.round(widthMm * pxPerMm));
+            const widthMm  = lengthToMm(widthAttr,  i.width);
+            const heightMm = lengthToMm(heightAttr, i.height);
 
-// Keep the original image aspect ratio
-const aspect        = i.height / i.width; // h / w
-const targetHeightPx = Math.max(1, Math.round(targetWidthPx * aspect));
-// ⭐⭐ ADD THIS HERE — THE DEBUG LOG ⭐⭐
-logImageDebug(img.id || "(unnamed image)", widthMm, targetWidthPx);
+            // 2) Target pixel size to match engraver DPI
+            const pxPerMm = engraveDpi / 25.4;
+            const targetWidthPx  = Math.max(1, Math.round(widthMm  * pxPerMm));
+            const targetHeightPx = Math.max(1, Math.round(heightMm * pxPerMm));
 
             // Low-DPI warning (once)
             const actualPxPerMm = i.width / widthMm;
