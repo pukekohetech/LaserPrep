@@ -661,6 +661,50 @@ function moverMouseUp(e) {
   window.removeEventListener('mouseup', moverMouseUp);
 }
 
+  function moverTouchStart(e) {
+  if (!finalSVG) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  const touch = e.touches[0];
+  // Reuse moverMouseDown logic by faking a mouse event
+  moverMouseDown({
+    currentTarget: e.currentTarget,
+    clientX: touch.clientX,
+    clientY: touch.clientY,
+    preventDefault: () => {},
+    stopPropagation: () => {}
+  });
+
+  // Also wire up touch move/end handlers
+  window.addEventListener('touchmove', moverTouchMove, { passive: false });
+  window.addEventListener('touchend', moverTouchEnd);
+  window.addEventListener('touchcancel', moverTouchEnd);
+}
+
+function moverTouchMove(e) {
+  if (!dragState || !finalSVG) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  moverMouseMove({
+    clientX: touch.clientX,
+    clientY: touch.clientY,
+    preventDefault: () => {}
+  });
+}
+
+function moverTouchEnd(e) {
+  if (!dragState) return;
+  moverMouseUp({
+    preventDefault: () => {}
+  });
+
+  window.removeEventListener('touchmove', moverTouchMove);
+  window.removeEventListener('touchend', moverTouchEnd);
+  window.removeEventListener('touchcancel', moverTouchEnd);
+}
+
+
 function snapMoverToNeighbours(m) {
   const snapTol = 20;
 
