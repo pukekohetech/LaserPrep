@@ -869,24 +869,36 @@ function updateResizeHandle() {
 function startSheetResize(e) {
   if (!finalSVG) return;
   e.preventDefault();
-  e.stopPropagation();
+  e.stopPropagation && e.stopPropagation();
 
-  const pt = clientToSVG(finalSVG, e.clientX, e.clientY);
+  // Support mouse AND touch
+  const point = e.touches ? e.touches[0] : e;
+  const pt = clientToSVG(finalSVG, point.clientX, point.clientY);
+
   resizeState = {
     startMouse: pt,
     startW: sheetW,
     startH: sheetH
   };
 
+  // Mouse listeners
   window.addEventListener('mousemove', doSheetResize);
   window.addEventListener('mouseup', stopSheetResize);
+
+  // Touch listeners
+  window.addEventListener('touchmove', doSheetResize, { passive: false });
+  window.addEventListener('touchend', stopSheetResize);
+  window.addEventListener('touchcancel', stopSheetResize);
 }
 
 function doSheetResize(e) {
   if (!resizeState || !finalSVG) return;
-  e.preventDefault();
+  e.preventDefault && e.preventDefault();
 
-  const pt = clientToSVG(finalSVG, e.clientX, e.clientY);
+  // Mouse or touch
+  const point = e.touches ? e.touches[0] : e;
+  const pt = clientToSVG(finalSVG, point.clientX, point.clientY);
+
   const dx = pt.x - resizeState.startMouse.x;
   const dy = pt.y - resizeState.startMouse.y;
 
@@ -915,15 +927,21 @@ function doSheetResize(e) {
 
 function stopSheetResize(e) {
   if (!resizeState) return;
-  e.preventDefault();
+  e && e.preventDefault && e.preventDefault();
+
   resizeState = null;
 
+  // Remove both mouse and touch listeners
   window.removeEventListener('mousemove', doSheetResize);
   window.removeEventListener('mouseup', stopSheetResize);
+  window.removeEventListener('touchmove', doSheetResize);
+  window.removeEventListener('touchend', stopSheetResize);
+  window.removeEventListener('touchcancel', stopSheetResize);
 
   // Re-pack into the new sheet size when resizing is finished
   repackExisting(true, true); // silent = true
 }
+
 
 /* ---------- auto-tighten sheet before export ---------- */
 
