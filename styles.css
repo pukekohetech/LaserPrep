@@ -81,5 +81,9 @@ button {
   font-size: 0.95em;
 }
 
-.mover-member { cursor: move; }
+.mover-member {
+  cursor: move;
+  touch-action: none; /* stop the page from scrolling when you drag a part */
+}
+
 .resize-handle { cursor: se-resize; }
