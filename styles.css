@@ -86,4 +86,8 @@ button {
   touch-action: none; /* stop the page from scrolling when you drag a part */
 }
 
-.resize-handle { cursor: se-resize; }
+.resize-handle {
+  cursor: se-resize;
+  touch-action: none; /* don't let the page scroll when resizing */
+}
+
