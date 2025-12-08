@@ -857,10 +857,14 @@ function updateResizeHandle() {
   if (!finalSVG) return;
   const handle = finalSVG.querySelector('#resizeHandle');
   if (!handle) return;
-  const size = 8;
-  handle.setAttribute('x', sheetW - size);
-  handle.setAttribute('y', sheetH - size);
+
+  const x = sheetW - HANDLE_SIZE - HANDLE_MARGIN;
+  const y = sheetH - HANDLE_SIZE - HANDLE_MARGIN;
+
+  handle.setAttribute('x', x);
+  handle.setAttribute('y', y);
 }
+
 
 function startSheetResize(e) {
   if (!finalSVG) return;
