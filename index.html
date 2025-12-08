@@ -348,16 +348,18 @@ async function processAll(silent = false) {
           const i = new Image();
           i.onload = () => {
             // 1) Work out physical size in mm from SVG
-            const widthAttr  = img.getAttribute('width');
-            const heightAttr = img.getAttribute('height');
+      // 1) Work out physical width in mm from SVG
+const widthAttr  = img.getAttribute('width');
+const widthMm    = lengthToMm(widthAttr, i.width);
 
-            const widthMm  = lengthToMm(widthAttr,  i.width);
-            const heightMm = lengthToMm(heightAttr, i.height);
+// 2) Target pixel size to match engraver DPI (use width only)
+const pxPerMm = engraveDpi / 25.4;
+const targetWidthPx  = Math.max(1, Math.round(widthMm * pxPerMm));
 
-            // 2) Target pixel size to match engraver DPI
-            const pxPerMm = engraveDpi / 25.4;
-            const targetWidthPx  = Math.max(1, Math.round(widthMm  * pxPerMm));
-            const targetHeightPx = Math.max(1, Math.round(heightMm * pxPerMm));
+// Keep the original image aspect ratio
+const aspect        = i.height / i.width; // h / w
+const targetHeightPx = Math.max(1, Math.round(targetWidthPx * aspect));
+
 
             // Low-DPI warning (once)
             const actualPxPerMm = i.width / widthMm;
