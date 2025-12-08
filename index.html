@@ -258,6 +258,20 @@ function maybeWarnLowDpi(label, pxPerMm) {
   );
 }
 
+function logImageDebug(label, widthMm, pxW) {
+  const dpi = pxW / (widthMm / 25.4);
+  console.log(
+    `%c[IMAGE DEBUG] ${label}\n` +
+    `   SVG width:     ${widthMm.toFixed(2)} mm\n` +
+    `   Pixel width:   ${pxW} px\n` +
+    `   Effective DPI: ${dpi.toFixed(2)} dpi`,
+    "color:#0a0; font-weight:bold"
+  );
+}
+
+
+
+  
 /* ---------- processing: clean SVGs into a single master ---------- */
 /* silent = true → no alerts (for auto-run) */
 
@@ -359,7 +373,8 @@ const targetWidthPx  = Math.max(1, Math.round(widthMm * pxPerMm));
 // Keep the original image aspect ratio
 const aspect        = i.height / i.width; // h / w
 const targetHeightPx = Math.max(1, Math.round(targetWidthPx * aspect));
-
+// ⭐⭐ ADD THIS HERE — THE DEBUG LOG ⭐⭐
+logImageDebug(img.id || "(unnamed image)", widthMm, targetWidthPx);
 
             // Low-DPI warning (once)
             const actualPxPerMm = i.width / widthMm;
