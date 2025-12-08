@@ -93,6 +93,9 @@ const contrastSlider = document.getElementById('contrast');
 const contrastLabel  = document.getElementById('cVal');
 const out            = document.getElementById('out');
 const nameInput      = document.getElementById('studentName');
+const HANDLE_SIZE   = 36;   // <— big enough for thumbs
+const HANDLE_MARGIN = 12;   // inset from the corner so phone gestures don’t fight it
+
 
 /* ---------- basic UI wiring ---------- */
 
@@ -811,21 +814,44 @@ function snapMoverToNeighbours(m) {
 function addResizeHandle() {
   if (!finalSVG) return;
   let handle = finalSVG.querySelector('#resizeHandle');
+
   if (!handle) {
     handle = document.createElementNS("http://www.w3.org/2000/svg", "rect");
     handle.id = 'resizeHandle';
     handle.classList.add('resize-handle');
-    handle.setAttribute('width', 8);
-    handle.setAttribute('height', 8);
+
+    handle.setAttribute('width', HANDLE_SIZE);
+    handle.setAttribute('height', HANDLE_SIZE);
+
     handle.setAttribute('fill', '#c00');
     handle.setAttribute('stroke', '#c00');
     handle.setAttribute('stroke-width', '0.5');
+
+    // IMPORTANT: make touch dragging work
     handle.style.cursor = 'se-resize';
+    handle.style.touchAction = 'none';
+
     finalSVG.appendChild(handle);
+
+    // Mouse support
     handle.addEventListener('mousedown', startSheetResize);
+
+    // Touch support
+    handle.addEventListener('touchstart', e => {
+      e.preventDefault();
+      const t = e.touches[0];
+      startSheetResize({
+        preventDefault: () => {},
+        stopPropagation: () => {},
+        clientX: t.clientX,
+        clientY: t.clientY
+      });
+    }, { passive: false });
   }
+
   updateResizeHandle();
 }
+
 
 function updateResizeHandle() {
   if (!finalSVG) return;
