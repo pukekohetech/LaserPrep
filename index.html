@@ -167,15 +167,21 @@ function safeBBox(node) {
   try {
     if (typeof node.getBBox === 'function') {
       const bb = node.getBBox();
-      if (isFinite(bb.x) && isFinite(bb.y) &&
-          isFinite(bb.width) && isFinite(bb.height) &&
-          bb.width > 0 && bb.height > 0) {
+
+      if (
+        isFinite(bb.x) && isFinite(bb.y) &&
+        isFinite(bb.width) && isFinite(bb.height) &&
+        // allow vertical or horizontal lines: at least one dimension > 0
+        (bb.width > 0 || bb.height > 0)
+      ) {
         return bb;
       }
     }
   } catch (e) {}
+
   return null;
 }
+
 
 /* ---------- processing: clean SVGs into a single master ---------- */
 /* silent = true → no alerts (for auto-run) */
