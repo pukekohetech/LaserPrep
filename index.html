@@ -438,15 +438,22 @@ function buildMoversFromOverlap(rootContainer) {
     }
   }
 
-  // Make members draggable
-  movers.forEach(m => {
-    m.members.forEach(el => {
-      el.classList.add('mover-member');
-      el.dataset.moverId = String(m.id);
-      el.setAttribute('pointer-events', 'bounding-box');
-      el.onmousedown = moverMouseDown;
-    });
+movers.forEach(m => {
+  m.members.forEach(el => {
+    el.classList.add('mover-member');
+    el.dataset.moverId = String(m.id);
+
+    // Use the whole bounding box as the hit area
+    el.setAttribute('pointer-events', 'bounding-box');
+
+    // Mouse drag
+    el.onmousedown = moverMouseDown;
+
+    // Touch drag
+    el.addEventListener('touchstart', moverTouchStart, { passive: false });
   });
+});
+
 }
 
 /* ---------- bottom-left packing ---------- */
