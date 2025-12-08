@@ -18,7 +18,7 @@
 </head>
 <body>
 
-<h1>PHS - Laser SVG Prep — Smart Packing Edition</h1>
+<h1>PHS - Laser SVG Prep — Smart Packing Edition- image1.0 </h1>
 <p>Drop Inkscape SVGs → clean red lines, engraving images, smart packing, and SVG/PDF export.</p>
 
 <div class="drop" id="dropZone">Drop SVG files here or click</div>
@@ -44,11 +44,26 @@
   </div>
 
   <div class="slider">
+    Engraving resolution&nbsp;
+    <select id="dpiSelect">
+      <option value="125">125 dpi</option>
+      <option value="250" selected>250 dpi</option>
+      <option value="333">333 dpi</option>
+      <option value="500">500 dpi</option>
+      <option value="600">600 dpi</option>
+      <option value="1000">1000 dpi</option>
+    </select>
+    <div style="font-size:0.85em; color:#555; margin-top:4px;">
+      Match this to the DPI you choose in the laser software.
+    </div>
+  </div>
+
+  <div class="slider">
     Background cleanup&nbsp;
     <span id="bgVal">245</span>
     <input type="range" id="bgThreshold" min="200" max="255" step="1" value="245">
     <div style="font-size:0.85em; color:#555; margin-top:4px;">
-      Higher = remove more light pixels (good for photos/screenshots that show boxes).
+      Higher = remove more light pixels (helps hide JPEG blocks/boxes).
     </div>
   </div>
 
@@ -74,7 +89,6 @@
     <li>Drop SVGs → they are automatically cleaned and packed</li>
     <li>Drag parts to tweak, or resize the sheet with the red corner handle</li>
     <li>When you finish resizing, parts re-pack to the new sheet size</li>
-    <li>On export, you’re asked if you want to shrink the sheet to remove blank space</li>
     <li>Then you’re prompted for the student name (used in the file name)</li>
   </ul>
   100% offline • Multiple files • Exports SVG + PDF
@@ -100,8 +114,10 @@ let resizeState = null;
 
 const DISPLAY_CUT_WIDTH = 0.2;      // screen hairline
 const EXPORT_CUT_WIDTH  = '0.026';  // real laser hairline (mm-ish)
-const HANDLE_SIZE   = 18;           // resize handle size (mm in SVG units)
-const HANDLE_MARGIN = 0;            // inset from sheet edge
+const HANDLE_SIZE   = 18;           // resize handle size (in SVG units, mm here)
+const HANDLE_MARGIN = 0;
+
+let shownLowDpiWarning = false;
 
 /* ---------- DOM refs ---------- */
 
@@ -117,6 +133,7 @@ const contrastLabel  = document.getElementById('cVal');
 const bgSlider       = document.getElementById('bgThreshold');
 const bgLabel        = document.getElementById('bgVal');
 const forceBlackChk  = document.getElementById('forceBlack');
+const dpiSelect      = document.getElementById('dpiSelect');
 const out            = document.getElementById('out');
 const nameInput      = document.getElementById('studentName');
 
@@ -181,9 +198,7 @@ async function loadFiles(files) {
   if (!svgFiles.length) return;
 
   goBtn.disabled = false;
-
-  // Auto process + pack when files are chosen
-  await processAll(true);   // silent mode
+  await processAll(true);   // silent auto-run
 }
 
 /* Safe getBBox wrapper */
@@ -201,8 +216,46 @@ function safeBBox(node) {
       }
     }
   } catch (e) {}
-
   return null;
+}
+
+// Convert an SVG length attribute to millimetres.
+// Falls back to px→mm assuming 96 px/inch when unit missing.
+function lengthToMm(attrValue, pxFallback) {
+  const PX_PER_INCH = 96;
+  if (!attrValue) {
+    const px = pxFallback || 0;
+    return (px / PX_PER_INCH) * 25.4;
+  }
+
+  const m = String(attrValue).trim().match(/^([\d.]+)\s*(mm|cm|in|px)?$/i);
+  if (!m) {
+    const px = parseFloat(attrValue) || pxFallback || 0;
+    return (px / PX_PER_INCH) * 25.4;
+  }
+
+  const val  = parseFloat(m[1]) || 0;
+  const unit = (m[2] || 'px').toLowerCase();
+
+  switch (unit) {
+    case 'mm': return val;
+    case 'cm': return val * 10;
+    case 'in': return val * 25.4;
+    case 'px':
+    default:
+      return (val / PX_PER_INCH) * 25.4;
+  }
+}
+
+function maybeWarnLowDpi(label, pxPerMm) {
+  if (shownLowDpiWarning) return;
+  shownLowDpiWarning = true;
+  alert(
+    `Warning: One or more images are low resolution for their physical size.\n\n` +
+    `Approximate resolution: ${pxPerMm.toFixed(1)} pixels per mm.\n` +
+    `You may see blocky boxes / banding when engraving.\n\n` +
+    `Use a higher resolution image or engrave it smaller for best results.`
+  );
 }
 
 /* ---------- processing: clean SVGs into a single master ---------- */
@@ -220,6 +273,7 @@ async function processAll(silent = false) {
   const contrast    = +contrastSlider.value || 1.8;
   const bgThreshold = +bgSlider.value       || 245;
   const forceBlack  = !!forceBlackChk.checked;
+  const engraveDpi  = +dpiSelect.value      || 250;
 
   const master = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   master.setAttribute("width", sheetW + "mm");
@@ -286,21 +340,44 @@ async function processAll(silent = false) {
       el.setAttribute('data-cut-line', 'true');
     });
 
-    // Clean images: grayscale + contrast + configurable background removal
+    // Clean images: grayscale + contrast + DPI-aware resampling + background removal
     for (const img of svg.querySelectorAll('image')) {
       let src = img.getAttribute('href') || img.getAttribute('xlink:href');
       if (src && src.startsWith('data:image')) {
         src = await new Promise(res => {
           const i = new Image();
           i.onload = () => {
+            // 1) Work out physical size in mm from SVG
+            const widthAttr  = img.getAttribute('width');
+            const heightAttr = img.getAttribute('height');
+
+            const widthMm  = lengthToMm(widthAttr,  i.width);
+            const heightMm = lengthToMm(heightAttr, i.height);
+
+            // 2) Target pixel size to match engraver DPI
+            const pxPerMm = engraveDpi / 25.4;
+            const targetWidthPx  = Math.max(1, Math.round(widthMm  * pxPerMm));
+            const targetHeightPx = Math.max(1, Math.round(heightMm * pxPerMm));
+
+            // Low-DPI warning (once)
+            const actualPxPerMm = i.width / widthMm;
+            if (actualPxPerMm < pxPerMm && !shownLowDpiWarning) {
+              maybeWarnLowDpi(file.name || 'image', actualPxPerMm);
+            }
+
+            // 3) Canvas at target DPI
             const c = document.createElement('canvas');
-            c.width = i.width; c.height = i.height;
+            c.width  = targetWidthPx;
+            c.height = targetHeightPx;
+
             const ctx = c.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
 
-            // Apply grayscale + user contrast
+            // 4) Draw original image scaled
             ctx.filter = `grayscale(100%) contrast(${contrast})`;
-            ctx.drawImage(i, 0, 0);
+            ctx.drawImage(i, 0, 0, targetWidthPx, targetHeightPx);
 
+            // 5) Threshold / cleanup
             const imgData = ctx.getImageData(0,0,c.width,c.height);
             const d = imgData.data;
 
@@ -309,16 +386,11 @@ async function processAll(silent = false) {
               const gray = (r + g + b) / 3;
 
               if (gray > bgThreshold) {
-                // Treat very light pixels as background
-                d[j+3] = 0; // fully transparent
+                d[j+3] = 0; // transparent background
               } else if (forceBlack) {
-                // For line art: turn everything else into pure black
-                d[j] = d[j+1] = d[j+2] = 0;
-                // d[j+3] stays as-is (or could be set to 255)
-              } else {
-                // Keep grayscale (after contrast) for shaded engraves
-                // nothing extra to do here
+                d[j] = d[j+1] = d[j+2] = 0; // pure black
               }
+              // else: keep grayscale for photo-style engraves
             }
 
             ctx.putImageData(imgData,0,0);
@@ -446,7 +518,6 @@ function buildMoversFromOverlap(rootContainer) {
     rootContainer.querySelectorAll("path, rect, circle, ellipse, polygon, polyline, line, image, text")
   );
 
-  // Start with one mover per element
   allShapes.forEach(el => {
     if (!isShapeOrImage(el)) return;
     const bb = safeBBox(el);
@@ -907,11 +978,9 @@ function startSheetResize(e) {
     startH: sheetH
   };
 
-  // Mouse listeners
   window.addEventListener('mousemove', doSheetResize);
   window.addEventListener('mouseup', stopSheetResize);
 
-  // Touch listeners
   window.addEventListener('touchmove', doSheetResize, { passive: false });
   window.addEventListener('touchend', stopSheetResize);
   window.addEventListener('touchcancel', stopSheetResize);
@@ -962,10 +1031,10 @@ function stopSheetResize(e) {
   window.removeEventListener('touchend', stopSheetResize);
   window.removeEventListener('touchcancel', stopSheetResize);
 
-  repackExisting(true, true); // silent = true
+  repackExisting(true, true); // silent
 }
 
-/* ---------- auto-tighten sheet before export ---------- */
+/* ---------- auto-tighten sheet before export (currently unused hook) ---------- */
 
 function computeContentBounds() {
   if (!finalSVG) return null;
